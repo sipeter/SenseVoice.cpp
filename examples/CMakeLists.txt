@@ -3,7 +3,7 @@ add_library(common STATIC
         common-ggml.cc
 )
 
-find_package(SDL2 QUIET)
+find_package(SDL2 REQUIRED CONFIG)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 set(ExampleLibs ggml)
