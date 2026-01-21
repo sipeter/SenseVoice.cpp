@@ -24,6 +24,7 @@
 // ==========================================
 std::atomic<bool> g_is_recording(false);
 std::atomic<bool> g_should_exit(false);
+std::atomic<bool> g_needs_flush(false);
 
 // ==========================================
 // 辅助结构与函数 (保留自原版)
@@ -166,49 +167,61 @@ void AudioWorker(sense_voice_stream_params params) {
 
     // 4. 进入死循环，等待 g_is_recording 信号
     while (!g_should_exit) {
-        // A. 暂停状态：清空缓存，低功耗休眠
-        if (!g_is_recording) {
-            if (!pcmf32.empty()) {
+        // A. 录音状态：持续获取音频
+        if (g_is_recording) {
+            audio.get(params.chunk_size, pcmf32_audio);
+            if (!pcmf32_audio.empty()) {
+                pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                pcmf32_audio.clear();
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+
+        // B. 触发推理：流式触发 vs 最终冲刷触发
+        const int STEP_SAMPLES = (800 * SENSE_VOICE_SAMPLE_RATE) / 1000;
+        bool should_inference = (g_is_recording && (pcmf32.size() > idenitified_floats + STEP_SAMPLES));
+        bool is_final_flush = (!g_is_recording && g_needs_flush);
+
+        if (should_inference || is_final_flush) {
+            
+            // 【核心修复】：如果是最终冲刷，模拟“人肉长按”，多抓 200ms 的声音
+            if (is_final_flush) {
+                // 等待声音从声卡硬件流向程序驱动
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                // 强制把驱动缓冲区里的最后一点音频“抠出来”
+                audio.get(params.chunk_size, pcmf32_audio);
+                if (!pcmf32_audio.empty()) {
+                    pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                    pcmf32_audio.clear();
+                }
+            }
+
+            // 执行推理：处理 pcmf32 里的所有数据
+            int process_len = (int)pcmf32.size(); 
+            if (process_len > 0) {
+                if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
+                    // 确保 C# 能够即时收到
+                    std::cout << "RES: "; 
+                    sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
+                    std::cout << std::endl; 
+                    idenitified_floats = process_len;
+                }
+            }
+
+            // 冲刷结束后的收尾工作
+            if (is_final_flush) {
+                g_needs_flush = false; 
                 pcmf32.clear();
                 idenitified_floats = 0;
-                audio.clear(); // 清空底层 SDL 队列
+                audio.clear(); // 清空 SDL 内部队列
+                std::cout << "[[STOPPED]]" << std::endl; // 通知 C# 流程彻底结束
             }
+        }
+
+        // C. 休眠逻辑：既不录音也不冲刷时深睡
+        if (!g_is_recording && !g_needs_flush) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            continue;
-        }
-
-        // B. 录音状态：获取音频
-        audio.get(params.chunk_size, pcmf32_audio);
-        if (pcmf32_audio.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            continue;
-        }
-
-        // C. 累积数据
-        pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
-        pcmf32_audio.clear();
-
-        // D. 触发推理
-        // 策略：每积攒 800ms 数据，就尝试推理一次，实现流式上屏
-        // 注意：如果你希望它是 "说完再上屏"，可以将这个阈值调得很大，或者只在 STOP 时推理
-        const int STEP_MS = 800; 
-        const int STEP_SAMPLES = (STEP_MS * SENSE_VOICE_SAMPLE_RATE) / 1000;
-
-        if (pcmf32.size() > idenitified_floats + STEP_SAMPLES) {
-            int process_len = pcmf32.size() - idenitified_floats;
-            
-            // 执行模型推理
-            // 注意：sense_voice_full_parallel 内部会处理，返回 0 表示成功
-            if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
-                
-                // 打印结果：这一行会被 C# 捕获
-                // RES: 是我们约定的协议前缀
-                std::cout << "RES: "; 
-                sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
-                std::cout << std::endl; // 必须 flush，否则 C# 读不到
-                
-                idenitified_floats = pcmf32.size();
-            }
         }
     }
 
@@ -238,9 +251,11 @@ int main(int argc, char **argv) {
 
         if (line == "START") {
             g_is_recording = true;
+            g_needs_flush = false; // 开始新录音，重置冲刷标志
         } 
         else if (line == "STOP") {
-            g_is_recording = false;
+            g_is_recording = false; // 必须设为 false，否则 AudioWorker 不会进入 Flush 逻辑
+            g_needs_flush = true;   // 标记需要进行最后一次冲刷
             // 可以在这里打印一个标记，告诉 C# 本次录音结束
             // std::cout << "[[STOPPED]]" << std::endl;
         }
