@@ -1,6 +1,9 @@
 /*
  * Modified stream.cc for Windows Offline Voice Input (Geek Edition)
- * 包含：无限长语音支持 (Smart Segmentation) + 耳语增强 (AGC)
+ * 包含功能：
+ * 1. 无限长语音支持 (Smart Segmentation)
+ * 2. 耳语增强 (AGC)
+ * 3. [新增] 调试音频保存 (Save debug.wav)
  */
 
 #include "common-sdl.h"
@@ -28,9 +31,65 @@ std::atomic<bool> g_should_exit(false);
 std::atomic<bool> g_needs_flush(false);
 
 // ==========================================
-// 【Task 2】耳语增强 (AGC) 实现
+// 音频文件保存辅助函数 (用于调试)
 // ==========================================
-// 简单的自动增益控制：将过小的声音放大，但保留底噪
+
+// 复用已有的 wav 转换逻辑
+void float_to_pcm16(const std::vector<float>& float_audio, std::vector<int16_t>& pcm16_audio) {
+    pcm16_audio.resize(float_audio.size());
+    for (size_t i = 0; i < float_audio.size(); ++i) {
+        float sample = std::max(-1.0f, std::min(1.0f, float_audio[i]));
+        pcm16_audio[i] = static_cast<int16_t>(sample * 32767.0f);
+    }
+}
+
+struct WAVHeader {
+    char riff[4] = {'R', 'I', 'F', 'F'};
+    uint32_t file_size;
+    char wave[4] = {'W', 'A', 'V', 'E'};
+    char fmt[4] = {'f', 'm', 't', ' '};
+    uint32_t fmt_size = 16;
+    uint16_t audio_format = 1;
+    uint16_t num_channels = 1;
+    uint32_t sample_rate = SENSE_VOICE_SAMPLE_RATE;
+    uint32_t byte_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample = 16;
+    char data[4] = {'d', 'a', 't', 'a'};
+    uint32_t data_size;
+    WAVHeader() {
+        byte_rate = sample_rate * num_channels * bits_per_sample / 8;
+        block_align = num_channels * bits_per_sample / 8;
+        file_size = 0; data_size = 0;
+    }
+};
+
+void write_wav_file(const std::string& filename, const std::vector<float>& audio_data, int sample_rate) {
+    if (audio_data.empty()) return;
+
+    std::vector<int16_t> pcm16;
+    float_to_pcm16(audio_data, pcm16);
+
+    WAVHeader header;
+    header.sample_rate = sample_rate;
+    header.byte_rate = header.sample_rate * 2; // 16bit = 2 bytes
+    header.data_size = (uint32_t)pcm16.size() * 2;
+    header.file_size = header.data_size + 36;
+
+    std::ofstream file(filename, std::ios::binary);
+    if (file.is_open()) {
+        file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        file.write(reinterpret_cast<const char*>(pcm16.data()), pcm16.size() * 2);
+        file.close();
+        // 只有在 debug 模式或为了确认时才打印，以免污染 IPC 通道，
+        // 但这里我们加上前缀 DEBUG: 方便 C# 过滤
+        std::cout << "[[DEBUG: Saved " << filename << "]]" << std::endl;
+    }
+}
+
+// ==========================================
+// 耳语增强 (AGC) 实现
+// ==========================================
 void apply_whisper_enhancement(std::vector<float>& audio_chunk) {
     if (audio_chunk.empty()) return;
 
@@ -40,20 +99,16 @@ void apply_whisper_enhancement(std::vector<float>& audio_chunk) {
         if (abs_val > max_amp) max_amp = abs_val;
     }
 
-    // 参数配置
-    const float NOISE_GATE = 0.01f; // 噪音门限：低于此值被视为背景噪音，不盲目放大
-    const float TARGET_AMP = 0.5f;  // 目标音量：希望放大到的峰值 (0.0 - 1.0)
-    const float MAX_GAIN = 5.0f;    // 最大增益倍数：防止爆音
+    const float NOISE_GATE = 0.01f; // 噪音门限
+    const float TARGET_AMP = 0.5f;  // 目标音量
+    const float MAX_GAIN = 5.0f;    // 最大增益
 
-    // 逻辑：如果声音大于噪音门限，但小于目标音量，则进行放大
     if (max_amp > NOISE_GATE && max_amp < TARGET_AMP) {
         float gain = TARGET_AMP / max_amp;
         if (gain > MAX_GAIN) gain = MAX_GAIN;
 
-        // 应用增益
         for (size_t i = 0; i < audio_chunk.size(); ++i) {
             audio_chunk[i] *= gain;
-            // 硬限幅防止溢出
             if (audio_chunk[i] > 1.0f) audio_chunk[i] = 1.0f;
             if (audio_chunk[i] < -1.0f) audio_chunk[i] = -1.0f;
         }
@@ -61,7 +116,7 @@ void apply_whisper_enhancement(std::vector<float>& audio_chunk) {
 }
 
 // ==========================================
-// 辅助结构与函数 (保留)
+// 辅助结构与函数 (参数解析等)
 // ==========================================
 struct sense_voice_stream_params {
     int32_t n_threads = std::min(4, (int32_t) std::thread::hardware_concurrency());
@@ -126,9 +181,13 @@ void AudioWorker(sense_voice_stream_params params) {
     ctx->language_id = sense_voice_lang_id(params.language.c_str());
     if (ctx->language_id == -1) ctx->language_id = sense_voice_lang_id("auto");
 
-    std::vector<float> pcmf32_audio; // 临时接收音频
-    std::vector<double> pcmf32;      // 累积音频用于推理
-    pcmf32.reserve(32000 * 30);      // 预留空间
+    std::vector<float> pcmf32_audio; // 临时接收音频 (Chunk)
+    std::vector<double> pcmf32;      // 累积音频用于推理 (Inference Buffer)
+    pcmf32.reserve(32000 * 30);
+
+    // 【新增】全量录音缓存，用于保存 debug.wav
+    std::vector<float> full_session_audio; 
+    full_session_audio.reserve(16000 * 60); // 预留一分钟
 
     sense_voice_full_params wparams = sense_voice_full_default_params(SENSE_VOICE_SAMPLING_GREEDY);
     wparams.language = params.language.c_str();
@@ -136,9 +195,9 @@ void AudioWorker(sense_voice_stream_params params) {
 
     int idenitified_floats = 0;
     
-    // 分段逻辑使用的变量
+    // 分段逻辑变量
     const int SAMPLE_RATE = SENSE_VOICE_SAMPLE_RATE;
-    float current_chunk_max_amp = 0.0f; // 当前小块的音量峰值
+    float current_chunk_max_amp = 0.0f; 
 
     std::cout << "[[ENGINE_READY]]" << std::endl;
 
@@ -148,35 +207,36 @@ void AudioWorker(sense_voice_stream_params params) {
             audio.get(params.chunk_size, pcmf32_audio);
             if (!pcmf32_audio.empty()) {
                 
-                // 【Task 2 调用点】应用耳语增强 (AGC)
+                // 1. 应用耳语增强
                 apply_whisper_enhancement(pcmf32_audio);
 
-                // 计算当前 chunk 的静音状态 (用于分段判断)
+                // 2. 计算音量 (用于分段)
                 current_chunk_max_amp = 0.0f;
                 for(float f : pcmf32_audio) current_chunk_max_amp = std::max(current_chunk_max_amp, std::abs(f));
 
-                // 存入主缓冲区
+                // 3. 存入推理 Buffer
                 pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                
+                // 4. 【新增】存入调试保存 Buffer (保存的是增强后的声音)
+                full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+
                 pcmf32_audio.clear();
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
         }
 
-        // B. 触发推理 (常规流式 + 最终冲刷 + 智能分段)
+        // B. 触发推理
         const int STEP_SAMPLES = (800 * SAMPLE_RATE) / 1000;
         bool should_inference = (g_is_recording && (pcmf32.size() > idenitified_floats + STEP_SAMPLES));
         bool is_final_flush = (!g_is_recording && g_needs_flush);
 
-        // 【Task 1】智能分段检测逻辑
+        // 智能分段判断
         bool trigger_segmentation = false;
         if (g_is_recording && pcmf32.size() > 0) {
             double duration_sec = (double)pcmf32.size() / SAMPLE_RATE;
-            bool is_quiet = (current_chunk_max_amp < 0.05f); // 静音门限
-
-            // 规则1：超过15秒且遇到静音 -> 切分
+            bool is_quiet = (current_chunk_max_amp < 0.05f); 
             if (duration_sec > 15.0 && is_quiet) trigger_segmentation = true;
-            // 规则2：超过28秒 (模型极限) -> 强制切分
             else if (duration_sec > 28.0) trigger_segmentation = true;
         }
 
@@ -187,8 +247,13 @@ void AudioWorker(sense_voice_stream_params params) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 audio.get(params.chunk_size, pcmf32_audio);
                 if (!pcmf32_audio.empty()) {
-                    apply_whisper_enhancement(pcmf32_audio); // 尾部也要增强
+                    apply_whisper_enhancement(pcmf32_audio); // 记得尾部也要增强
+
                     pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                    
+                    // 【新增】调试 Buffer 也要补上这一块
+                    full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                    
                     pcmf32_audio.clear();
                 }
             }
@@ -197,13 +262,8 @@ void AudioWorker(sense_voice_stream_params params) {
             int process_len = (int)pcmf32.size(); 
             if (process_len > 0) {
                 if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
-                    
-                    // 【Task 1】输出逻辑：如果是分段，输出 SEG；如果是流式或结束，输出 RES
-                    if (trigger_segmentation) {
-                         std::cout << "SEG: "; // Segment Commmitted
-                    } else {
-                         std::cout << "RES: "; // Interim Result
-                    }
+                    if (trigger_segmentation) std::cout << "SEG: "; 
+                    else std::cout << "RES: "; 
                     
                     sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
                     std::cout << std::endl; 
@@ -212,16 +272,19 @@ void AudioWorker(sense_voice_stream_params params) {
                 }
             }
 
-            // 【Task 1】分段后的清理工作
+            // 分段清理 (只清空推理 Buffer，不清空录音文件 Buffer)
             if (trigger_segmentation) {
-                // 清空推理缓冲区，像新开始一样，但不需要重启 SDL 设备
                 pcmf32.clear();
                 idenitified_floats = 0;
-                // 注意：不设置 g_needs_flush，因为用户还在按着键
             }
 
-            // 最终冲刷后的清理工作
+            // 最终结束清理
             if (is_final_flush) {
+                // 【新增】保存录音文件到本地
+                // 注意：这会保存从按下 START 到 STOP 的完整过程，包括所有分段
+                write_wav_file("debug.wav", full_session_audio, SAMPLE_RATE);
+                full_session_audio.clear(); // 清空以备下次使用
+
                 g_needs_flush = false; 
                 pcmf32.clear();
                 idenitified_floats = 0;
