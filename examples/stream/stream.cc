@@ -129,6 +129,8 @@ struct sense_voice_stream_params {
     bool use_vad = false;
     bool use_itn = false;
     bool use_prefix = false;
+    // 【新增】默认关闭，只有传入 --save-audio 才开启，用于调试的时候，保存wav文件
+    bool save_audio = false;
     std::string language = "auto";
     std::string model = "models/ggml-base.en.bin";
     float speech_prob_threshold = 0.1f;
@@ -145,6 +147,8 @@ static bool get_stream_params(int argc, char **argv, sense_voice_stream_params &
         else if (arg == "-fa" || arg == "--flash-attn") params.flash_attn = true;
         else if (arg == "--use-itn") params.use_itn = true;
         else if (arg == "--use-vad") params.use_vad = true;
+        // 【新增】解析保存音频的参数
+        else if (arg == "--save-audio") params.save_audio = true;
     }
     return true;
 }
@@ -186,9 +190,12 @@ void AudioWorker(sense_voice_stream_params params) {
     pcmf32.reserve(32000 * 30);
 
     // 【新增】全量录音缓存，用于保存 debug.wav
+    // 【修改】只在开启时预留空间，否则不分配
     std::vector<float> full_session_audio; 
-    full_session_audio.reserve(16000 * 60); // 预留一分钟
-
+    if(params.save_audio){
+        full_session_audio.reserve(16000 * 60); // 预留一分钟
+    }
+    
     sense_voice_full_params wparams = sense_voice_full_default_params(SENSE_VOICE_SAMPLING_GREEDY);
     wparams.language = params.language.c_str();
     wparams.n_threads = params.n_threads;
@@ -218,8 +225,11 @@ void AudioWorker(sense_voice_stream_params params) {
                 pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
                 
                 // 4. 【新增】存入调试保存 Buffer (保存的是增强后的声音)
-                full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());
-
+                // 【修改】只有开启开关时，才往全量 buffer 里塞数据
+                if(params.save_audio){
+                    full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                }
+                
                 pcmf32_audio.clear();
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -252,8 +262,11 @@ void AudioWorker(sense_voice_stream_params params) {
                     pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
                     
                     // 【新增】调试 Buffer 也要补上这一块
-                    full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());
-                    
+                    // 【修改】同样加上判断
+                    if(params.save_audio){
+                        full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());                        
+                    }
+                                      
                     pcmf32_audio.clear();
                 }
             }
@@ -282,8 +295,11 @@ void AudioWorker(sense_voice_stream_params params) {
             if (is_final_flush) {
                 // 【新增】保存录音文件到本地
                 // 注意：这会保存从按下 START 到 STOP 的完整过程，包括所有分段
-                write_wav_file("debug.wav", full_session_audio, SAMPLE_RATE);
-                full_session_audio.clear(); // 清空以备下次使用
+                // 【修改】只有开启开关时才写文件
+                if(params.save_audio){
+                     write_wav_file("debug.wav", full_session_audio, SAMPLE_RATE);
+                    full_session_audio.clear(); // 清空以备下次使用
+                }
 
                 g_needs_flush = false; 
                 pcmf32.clear();
