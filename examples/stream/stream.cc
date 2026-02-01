@@ -22,6 +22,7 @@
 #include <atomic>
 #include <iostream>
 #include <cmath> // used for AGC
+#include "../zian_services.h"
 
 // ==========================================
 // 全局控制信号
@@ -153,7 +154,7 @@ static bool get_stream_params(int argc, char **argv, sense_voice_stream_params &
     return true;
 }
 
-void sense_voice_free(struct sense_voice_context *ctx) {
+static void sense_voice_free_stream(struct sense_voice_context *ctx) {
     if (ctx) {
         ggml_free(ctx->model.ctx);
         ggml_backend_buffer_free(ctx->model.buffer);
@@ -314,10 +315,10 @@ void AudioWorker(sense_voice_stream_params params) {
         }
     }
 
-    sense_voice_free(ctx);
+    sense_voice_free_stream(ctx);
 }
 
-int main(int argc, char **argv) {
+int run_input_mode(int argc, char **argv) {
     std::setvbuf(stdout, NULL, _IONBF, 0);
     sense_voice_stream_params params;
     if (!get_stream_params(argc, argv, params)) return 1;

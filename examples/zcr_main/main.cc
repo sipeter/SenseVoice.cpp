@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <thread>
 #include <fstream>
+#include "../zian_services.h"
 
 #if defined(_MSC_VER)
 #pragma warning(disable : 4244 4267)// possible loss of data
@@ -533,7 +534,7 @@ bool check_and_process_batch_if_full(struct sense_voice_context *ctx, const sens
     return false; // 表示未处理batch
 }
 
-int main(int argc, char **argv) {
+int run_transcribe_mode(int argc, char **argv) {
     sense_voice_params params;
 
     if (!sense_voice_params_parse(argc, argv, params)) {
