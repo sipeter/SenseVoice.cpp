@@ -90,32 +90,10 @@ void write_wav_file(const std::string& filename, const std::vector<float>& audio
 }
 
 // ==========================================
-// 耳语增强 (AGC) 实现
+// 耳语增强 (AGC) 实现 - 已移除
 // ==========================================
-void apply_whisper_enhancement(std::vector<float>& audio_chunk) {
-    if (audio_chunk.empty()) return;
+// 恢复原始音质，依靠模型原生能力
 
-    float max_amp = 0.0f;
-    for (float sample : audio_chunk) {
-        float abs_val = std::abs(sample);
-        if (abs_val > max_amp) max_amp = abs_val;
-    }
-
-    const float NOISE_GATE = 0.01f; // 噪音门限
-    const float TARGET_AMP = 0.5f;  // 目标音量
-    const float MAX_GAIN = 5.0f;    // 最大增益
-
-    if (max_amp > NOISE_GATE && max_amp < TARGET_AMP) {
-        float gain = TARGET_AMP / max_amp;
-        if (gain > MAX_GAIN) gain = MAX_GAIN;
-
-        for (size_t i = 0; i < audio_chunk.size(); ++i) {
-            audio_chunk[i] *= gain;
-            if (audio_chunk[i] > 1.0f) audio_chunk[i] = 1.0f;
-            if (audio_chunk[i] < -1.0f) audio_chunk[i] = -1.0f;
-        }
-    }
-}
 
 // ==========================================
 // 辅助结构与函数 (参数解析等)
@@ -223,8 +201,8 @@ void AudioWorker(sense_voice_stream_params params) {
             audio.get(params.chunk_size, pcmf32_audio);
             if (!pcmf32_audio.empty()) {
                 
-                // 1. 应用耳语增强
-                apply_whisper_enhancement(pcmf32_audio);
+                // 1. (已移除) 应用耳语增强
+                // apply_whisper_enhancement(pcmf32_audio);
 
                 // 2. 计算音量 (用于分段)
                 current_chunk_max_amp = 0.0f;
@@ -266,7 +244,7 @@ void AudioWorker(sense_voice_stream_params params) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 audio.get(params.chunk_size, pcmf32_audio);
                 if (!pcmf32_audio.empty()) {
-                    apply_whisper_enhancement(pcmf32_audio); // 记得尾部也要增强
+                    // apply_whisper_enhancement(pcmf32_audio); // (已移除) 记得尾部也要增强
 
                     pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
                     
