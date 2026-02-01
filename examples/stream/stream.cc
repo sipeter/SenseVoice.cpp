@@ -22,6 +22,7 @@
 #include <atomic>
 #include <iostream>
 #include <cmath> // used for AGC
+#include <ctime> // for timestamp
 #include "../zian_services.h"
 
 // ==========================================
@@ -132,6 +133,7 @@ struct sense_voice_stream_params {
     bool use_prefix = false;
     // 【新增】默认关闭，只有传入 --save-audio 才开启，用于调试的时候，保存wav文件
     bool save_audio = false;
+    std::string audio_path = "debug.wav";
     std::string language = "auto";
     std::string model = "models/ggml-base.en.bin";
     float speech_prob_threshold = 0.1f;
@@ -148,8 +150,14 @@ static bool get_stream_params(int argc, char **argv, sense_voice_stream_params &
         else if (arg == "-fa" || arg == "--flash-attn") params.flash_attn = true;
         else if (arg == "--use-itn") params.use_itn = true;
         else if (arg == "--use-vad") params.use_vad = true;
-        // 【新增】解析保存音频的参数
-        else if (arg == "--save-audio") params.save_audio = true;
+        // 【新增】解析保存音频的参数 (支持可选路径)
+        else if (arg == "--save-audio") {
+            params.save_audio = true;
+            // 检查下一个参数是否是路径 (不以 - 开头)
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                params.audio_path = argv[++i];
+            }
+        }
     }
     return true;
 }
@@ -298,7 +306,22 @@ void AudioWorker(sense_voice_stream_params params) {
                 // 注意：这会保存从按下 START 到 STOP 的完整过程，包括所有分段
                 // 【修改】只有开启开关时才写文件
                 if(params.save_audio){
-                     write_wav_file("debug.wav", full_session_audio, SAMPLE_RATE);
+                    // Generate timestamped filename
+                    std::time_t now = std::time(nullptr);
+                    struct tm tstruct;
+                    char buf[80];
+                    localtime_s(&tstruct, &now);
+                    std::strftime(buf, sizeof(buf), "_%Y-%m-%d_%H-%M-%S", &tstruct);
+
+                    std::string final_path = params.audio_path;
+                    size_t lastindex = final_path.find_last_of("."); 
+                    if (lastindex == std::string::npos) {
+                        final_path += buf; 
+                        final_path += ".wav";
+                    } else {
+                        final_path.insert(lastindex, buf); 
+                    }
+                     write_wav_file(final_path, full_session_audio, SAMPLE_RATE);
                     full_session_audio.clear(); // 清空以备下次使用
                 }
 
