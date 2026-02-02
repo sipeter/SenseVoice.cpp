@@ -4,3 +4,4 @@
 
 int run_transcribe_mode(int argc, char ** argv);
 int run_input_mode(int argc, char ** argv);
+void print_audio_devices();

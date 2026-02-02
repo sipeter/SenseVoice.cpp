@@ -17,6 +17,11 @@ int main(int argc, char* argv[]) {
 
     std::string mode = argv[1];
 
+    if (mode == "--list-devices") {
+        print_audio_devices();
+        return 0;
+    }
+
     // 参数重组 (Argument Shifting)
     // 我们需要移除 argv[1] (即 "--mode") 和 argv[2] (即 "input/file")
     // 将剩余参数构造一个新的 argv 传给子模块，模拟它们直接被调用的场景

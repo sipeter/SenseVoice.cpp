@@ -349,3 +349,21 @@ int run_input_mode(int argc, char **argv) {
     if (worker.joinable()) worker.join();
     return 0;
 }
+
+// [新增] 打印音频设备列表
+void print_audio_devices() {
+    // 初始化音频子系统
+    if (SDL_Init(SDL_INIT_AUDIO) < 0) {
+        std::cerr << "SDL_Init failed: " << SDL_GetError() << std::endl;
+        return;
+    }
+
+    int nDevices = SDL_GetNumAudioDevices(SDL_TRUE); // SDL_TRUE = capture devices
+    std::cout << "Found " << nDevices << " capture devices:" << std::endl;
+    for (int i = 0; i < nDevices; ++i) {
+        const char* name = SDL_GetAudioDeviceName(i, SDL_TRUE);
+        std::cout << i << ": " << (name ? name : "Unknown") << std::endl;
+    }
+    
+    SDL_Quit();
+}
