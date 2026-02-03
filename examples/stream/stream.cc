@@ -24,6 +24,7 @@
 #include <cmath> // used for AGC
 #include <ctime> // for timestamp
 #include "../zian_services.h"
+#include "../audio_pipe.h" // Zian Link: 支持 stdin PCM 输入
 
 // ==========================================
 // 全局控制信号
@@ -31,6 +32,10 @@
 std::atomic<bool> g_is_recording(false);
 std::atomic<bool> g_should_exit(false);
 std::atomic<bool> g_needs_flush(false);
+
+// 【Zian Link】帧协议常量
+const uint8_t FRAME_TYPE_CMD = 0x01;   // 文本指令帧
+const uint8_t FRAME_TYPE_AUDIO = 0x02; // 音频数据帧
 
 // ==========================================
 // 音频文件保存辅助函数 (用于调试)
@@ -111,6 +116,8 @@ struct sense_voice_stream_params {
     bool use_prefix = false;
     // 【新增】默认关闭，只有传入 --save-audio 才开启，用于调试的时候，保存wav文件
     bool save_audio = false;
+    // 【Zian Link】从 stdin 读取 PCM 音频而非麦克风
+    bool stdin_audio = false;
     std::string audio_path = "debug.wav";
     std::string language = "auto";
     std::string model = "models/ggml-base.en.bin";
@@ -128,6 +135,8 @@ static bool get_stream_params(int argc, char **argv, sense_voice_stream_params &
         else if (arg == "-fa" || arg == "--flash-attn") params.flash_attn = true;
         else if (arg == "--use-itn") params.use_itn = true;
         else if (arg == "--use-vad") params.use_vad = true;
+        // 【Zian Link】从 stdin 读取 PCM 音频
+        else if (arg == "--stdin-audio") params.stdin_audio = true;
         // 【新增】解析保存音频的参数 (支持可选路径)
         else if (arg == "--save-audio") {
             params.save_audio = true;
@@ -319,11 +328,175 @@ void AudioWorker(sense_voice_stream_params params) {
     sense_voice_free_stream(ctx);
 }
 
+// ==========================================
+// 【Zian Link】基于 stdin 管道音频的工作线程
+// ==========================================
+void AudioWorkerPipe(sense_voice_stream_params params, audio_pipe& pipe) {
+    struct sense_voice_context_params cparams = sense_voice_context_default_params();
+    cparams.use_gpu = params.use_gpu;
+    cparams.flash_attn = params.flash_attn;
+    cparams.use_itn = params.use_itn;
+
+    struct sense_voice_context *ctx = sense_voice_small_init_from_file_with_params(params.model.c_str(), cparams);
+    if (!ctx) {
+        std::cerr << "[AudioWorkerPipe] 模型加载失败" << std::endl;
+        return;
+    }
+
+    ctx->language_id = sense_voice_lang_id(params.language.c_str());
+    if (ctx->language_id == -1) ctx->language_id = sense_voice_lang_id("auto");
+
+    std::vector<float> pcmf32_audio; // 临时接收音频 (Chunk)
+    std::vector<double> pcmf32;      // 累积音频用于推理 (Inference Buffer)
+    pcmf32.reserve(32000 * 30);
+
+    std::vector<float> full_session_audio;
+    if(params.save_audio){
+        full_session_audio.reserve(16000 * 60);
+    }
+    
+    sense_voice_full_params wparams = sense_voice_full_default_params(SENSE_VOICE_SAMPLING_GREEDY);
+    wparams.language = params.language.c_str();
+    wparams.n_threads = params.n_threads;
+
+    int idenitified_floats = 0;
+    const int SAMPLE_RATE = SENSE_VOICE_SAMPLE_RATE;
+    float current_chunk_max_amp = 0.0f;
+
+    std::cout << "[[ENGINE_READY]]" << std::endl;
+
+    while (!g_should_exit) {
+        // A. 录音状态 - 从 pipe 获取音频
+        if (g_is_recording) {
+            pipe.get(params.chunk_size, pcmf32_audio);
+            if (!pcmf32_audio.empty()) {
+                current_chunk_max_amp = 0.0f;
+                for(float f : pcmf32_audio) current_chunk_max_amp = std::max(current_chunk_max_amp, std::abs(f));
+
+                pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                
+                if(params.save_audio){
+                    full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                }
+                
+                pcmf32_audio.clear();
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+
+        // B. 触发推理
+        const int STEP_SAMPLES = (800 * SAMPLE_RATE) / 1000;
+        bool should_inference = (g_is_recording && (pcmf32.size() > idenitified_floats + STEP_SAMPLES));
+        bool is_final_flush = (!g_is_recording && g_needs_flush);
+
+        bool trigger_segmentation = false;
+        if (g_is_recording && pcmf32.size() > 0) {
+            double duration_sec = (double)pcmf32.size() / SAMPLE_RATE;
+            bool is_quiet = (current_chunk_max_amp < 0.05f);
+            if (duration_sec > 15.0 && is_quiet) trigger_segmentation = true;
+            else if (duration_sec > 28.0) trigger_segmentation = true;
+        }
+
+        if (should_inference || is_final_flush || trigger_segmentation) {
+            
+            if (is_final_flush) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                pipe.get(params.chunk_size, pcmf32_audio);
+                if (!pcmf32_audio.empty()) {
+                    pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                    if(params.save_audio){
+                        full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                    }
+                    pcmf32_audio.clear();
+                }
+            }
+
+            int process_len = (int)pcmf32.size();
+            if (process_len > 0) {
+                if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
+                    if (trigger_segmentation) std::cout << "SEG: ";
+                    else std::cout << "RES: ";
+                    
+                    sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
+                    std::cout << std::endl;
+                    
+                    idenitified_floats = process_len;
+                }
+            }
+
+            if (trigger_segmentation) {
+                pcmf32.clear();
+                idenitified_floats = 0;
+            }
+
+            if (is_final_flush) {
+                if(params.save_audio){
+                    std::time_t now = std::time(nullptr);
+                    struct tm tstruct;
+                    char buf[80];
+                    localtime_s(&tstruct, &now);
+                    std::strftime(buf, sizeof(buf), "_%Y-%m-%d_%H-%M-%S", &tstruct);
+
+                    std::string final_path = params.audio_path;
+                    size_t lastindex = final_path.find_last_of(".");
+                    if (lastindex == std::string::npos) {
+                        final_path += buf;
+                        final_path += ".wav";
+                    } else {
+                        final_path.insert(lastindex, buf);
+                    }
+                    write_wav_file(final_path, full_session_audio, SAMPLE_RATE);
+                    full_session_audio.clear();
+                }
+
+                g_needs_flush = false;
+                pcmf32.clear();
+                idenitified_floats = 0;
+                pipe.clear();
+                std::cout << "[[STOPPED]]" << std::endl;
+            }
+        }
+
+        if (!g_is_recording && !g_needs_flush) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+
+    sense_voice_free_stream(ctx);
+}
+
 int run_input_mode(int argc, char **argv) {
     std::setvbuf(stdout, NULL, _IONBF, 0);
     sense_voice_stream_params params;
     if (!get_stream_params(argc, argv, params)) return 1;
 
+    // 【Zian Link】stdin 音频模式
+    if (params.stdin_audio) {
+        std::cerr << "[ZianCore] 启用 stdin 音频输入模式 (帧协议)" << std::endl;
+        
+        // 初始化 pipe 音频源 - 它会启动自己的线程读取 stdin
+        audio_pipe pipe_audio(SENSE_VOICE_SAMPLE_RATE);
+        if (!pipe_audio.init()) {
+            std::cerr << "[ZianCore] audio_pipe 初始化失败" << std::endl;
+            return 1;
+        }
+        
+        // 启动处理线程（使用 pipe_audio）
+        std::thread worker([&params, &pipe_audio]() {
+            AudioWorkerPipe(params, pipe_audio);
+        });
+        
+        // audio_pipe 的 reader_thread 会处理 stdin，主线程等待退出
+        while (!g_should_exit) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        if (worker.joinable()) worker.join();
+        return 0;
+    }
+
+    // 传统模式：文本指令 + 本地麦克风
     std::thread worker(AudioWorker, params);
 
     std::string line;

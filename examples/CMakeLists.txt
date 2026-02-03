@@ -30,6 +30,7 @@ if(SDL2_FOUND)
         ZianEntry.cpp 
         zcr_main/main.cc 
         stream/stream.cc
+        audio_pipe.cpp
     )
     # 添加 include 目录（从原 stream 和 zcr_main 的 CMakeLists.txt 复制）
     target_include_directories(ZianCore PRIVATE 
@@ -37,5 +38,22 @@ if(SDL2_FOUND)
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
     target_link_libraries(ZianCore PRIVATE sense-voice-core ggml common streamSDL)
+
+    if(MSVC)
+        target_compile_options(ZianCore PRIVATE 
+            /wd4820 # 'bytes' bytes padding added after data member 'member'
+            /wd4242 # 'identifier': conversion from 'type1' to 'type2', possible loss of data
+            /wd4710 # function not inlined
+            /wd4711 # function selected for automatic inline
+            /wd4061 # enumerator 'identifier' in switch of enum 'identifier' is not explicitly handled by a case label
+            /wd4514 # 'function' : unreferenced inline function has been removed
+            /wd5045 # Compiler will insert Spectre mitigation for memory load if /Qspectre switch specified
+            /wd4668 # 'symbol' is not defined as a preprocessor macro, replacing with '0' for 'directives'
+            /wd4365 # 'action' : conversion from 'type_1' to 'type_2', signed/unsigned mismatch
+            /wd4244 # 'argument' : conversion from 'type1' to 'type2', possible loss of data
+            /wd4267 # 'var' : conversion from 'size_t' to 'type', possible loss of data
+            /utf-8  # Set source and execution character sets to UTF-8
+        )
+    endif()
 endif()
 
