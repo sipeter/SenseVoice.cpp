@@ -23,9 +23,11 @@
 #include <iostream>
 #include <cmath> // used for AGC
 #include <ctime> // for timestamp
+#include <memory>
 #include "../zian_services.h"
 #include "../audio_pipe.h" // Zian Link: 支持 stdin PCM 输入
 #include "../audio_socket.h" // Zian Link: 支持 socket PCM 输入
+#include "../ring_buffer.h"
 
 // ==========================================
 // 全局控制信号
@@ -33,6 +35,14 @@
 std::atomic<bool> g_is_recording(false);
 std::atomic<bool> g_should_exit(false);
 std::atomic<bool> g_needs_flush(false);
+std::atomic<bool> g_preempt_requested(false);
+std::atomic<int> g_active_source(0);
+
+enum class SourceKind {
+    None = 0,
+    PC = 1,
+    Phone = 2,
+};
 
 // 【Zian Link】帧协议常量
 const uint8_t FRAME_TYPE_CMD = 0x01;   // 文本指令帧
@@ -121,6 +131,8 @@ struct sense_voice_stream_params {
     bool stdin_audio = false;
     // 【Zian Link】从 socket 读取 PCM 音频而非麦克风
     bool socket_audio = false;
+    // 【Zian Link】双输入：本地麦克风 + socket 同时启用（Selection 模式）
+    bool dual_audio = false;
     int socket_port = 8182;
     std::string audio_path = "debug.wav";
     std::string language = "auto";
@@ -148,6 +160,13 @@ static bool get_stream_params(int argc, char **argv, sense_voice_stream_params &
                 params.socket_port = std::stoi(argv[++i]);
             }
         }
+        // 【Zian Link】双输入模式（可选端口）
+        else if (arg == "--dual-audio") {
+            params.dual_audio = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                params.socket_port = std::stoi(argv[++i]);
+            }
+        }
         // 【新增】解析保存音频的参数 (支持可选路径)
         else if (arg == "--save-audio") {
             params.save_audio = true;
@@ -168,6 +187,123 @@ static void sense_voice_free_stream(struct sense_voice_context *ctx) {
         delete ctx->model.model;
         delete ctx;
     }
+}
+
+// ==========================================
+// 双输入：SDL 麦克风采集封装（带 RingBuffer）
+// ==========================================
+class sdl_mic_source {
+public:
+    explicit sdl_mic_source(int chunk_ms)
+        : m_chunk_ms(chunk_ms), m_audio(nullptr), m_running(false),
+          m_buffer(static_cast<size_t>(SENSE_VOICE_SAMPLE_RATE) * 30) {
+    }
+
+    bool init(int capture_id, int sample_rate) {
+        m_audio.reset(new audio_async(m_chunk_ms << 2));
+        if (!m_audio->init(capture_id, sample_rate)) {
+            return false;
+        }
+        if (!m_audio->resume()) {
+            return false;
+        }
+        return true;
+    }
+
+    void start() {
+        if (m_running) return;
+        m_running = true;
+        m_thread = std::thread([this]() {
+            std::vector<float> tmp;
+            while (m_running && !g_should_exit) {
+                m_audio->get(m_chunk_ms, tmp);
+                if (!tmp.empty()) {
+                    m_buffer.push(tmp);
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            }
+        });
+    }
+
+    void stop() {
+        m_running = false;
+        if (m_thread.joinable()) {
+            m_thread.join();
+        }
+    }
+
+    void get(int ms, std::vector<float>& audio) {
+        size_t samples_needed = (static_cast<size_t>(SENSE_VOICE_SAMPLE_RATE) * ms) / 1000;
+        m_buffer.read(samples_needed, audio, 20);
+    }
+
+    void clear() {
+        m_buffer.clear();
+    }
+
+    void set_idle(bool idle) {
+        m_buffer.set_overwrite_oldest(idle);
+    }
+
+private:
+    int m_chunk_ms;
+    std::unique_ptr<audio_async> m_audio;
+    std::atomic<bool> m_running;
+    std::thread m_thread;
+    RingBuffer<float> m_buffer;
+};
+
+// ==========================================
+// 指令解析（支持 START/STOP + 来源）
+// ==========================================
+enum class CommandType {
+    Start,
+    Stop,
+    Exit,
+    Unknown,
+};
+
+struct ParsedCommand {
+    CommandType type = CommandType::Unknown;
+    SourceKind source = SourceKind::None;
+    bool has_source = false;
+};
+
+static SourceKind parse_source_token(const std::string& token) {
+    if (token == "PC") return SourceKind::PC;
+    if (token == "PHONE") return SourceKind::Phone;
+    return SourceKind::None;
+}
+
+static ParsedCommand parse_command(const std::string& line) {
+    ParsedCommand cmd;
+    if (line.empty()) return cmd;
+
+    std::string first;
+    std::string second;
+    {
+        size_t pos = line.find(' ');
+        if (pos == std::string::npos) {
+            first = line;
+        } else {
+            first = line.substr(0, pos);
+            second = line.substr(pos + 1);
+            while (!second.empty() && second[0] == ' ') second.erase(0, 1);
+        }
+    }
+
+    if (first == "START") cmd.type = CommandType::Start;
+    else if (first == "STOP") cmd.type = CommandType::Stop;
+    else if (first == "EXIT") cmd.type = CommandType::Exit;
+    else cmd.type = CommandType::Unknown;
+
+    if (!second.empty()) {
+        cmd.source = parse_source_token(second);
+        cmd.has_source = (cmd.source != SourceKind::None);
+    }
+
+    return cmd;
 }
 
 // ==========================================
@@ -478,6 +614,169 @@ void AudioWorkerPipe(sense_voice_stream_params params, audio_pipe& pipe) {
 }
 
 // ==========================================
+// 【Zian Link】双输入：SDL + Socket（Selection + Preempt）
+// ==========================================
+void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audio_socket& sock) {
+    struct sense_voice_context_params cparams = sense_voice_context_default_params();
+    cparams.use_gpu = params.use_gpu;
+    cparams.flash_attn = params.flash_attn;
+    cparams.use_itn = params.use_itn;
+
+    struct sense_voice_context *ctx = sense_voice_small_init_from_file_with_params(params.model.c_str(), cparams);
+    if (!ctx) {
+        std::cerr << "[AudioWorkerDual] 模型加载失败" << std::endl;
+        return;
+    }
+
+    ctx->language_id = sense_voice_lang_id(params.language.c_str());
+    if (ctx->language_id == -1) ctx->language_id = sense_voice_lang_id("auto");
+
+    std::vector<float> pcmf32_audio;
+    std::vector<double> pcmf32;
+    pcmf32.reserve(32000 * 30);
+
+    std::vector<float> full_session_audio;
+    if (params.save_audio) {
+        full_session_audio.reserve(16000 * 60);
+    }
+
+    sense_voice_full_params wparams = sense_voice_full_default_params(SENSE_VOICE_SAMPLING_GREEDY);
+    wparams.language = params.language.c_str();
+    wparams.n_threads = params.n_threads;
+
+    int idenitified_floats = 0;
+    const int SAMPLE_RATE = SENSE_VOICE_SAMPLE_RATE;
+    float current_chunk_max_amp = 0.0f;
+
+    std::cout << "[[ENGINE_READY]]" << std::endl;
+
+    while (!g_should_exit) {
+        SourceKind active = static_cast<SourceKind>(g_active_source.load());
+
+        if (g_is_recording && active != SourceKind::None) {
+            if (active == SourceKind::PC) {
+                mic.get(params.chunk_size, pcmf32_audio);
+            } else if (active == SourceKind::Phone) {
+                sock.get(params.chunk_size, pcmf32_audio);
+            }
+
+            if (!pcmf32_audio.empty()) {
+                current_chunk_max_amp = 0.0f;
+                for (float f : pcmf32_audio) current_chunk_max_amp = std::max(current_chunk_max_amp, std::abs(f));
+
+                pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+
+                if (params.save_audio) {
+                    full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                }
+
+                pcmf32_audio.clear();
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+
+        const int STEP_SAMPLES = (800 * SAMPLE_RATE) / 1000;
+        bool should_inference = (g_is_recording && (pcmf32.size() > idenitified_floats + STEP_SAMPLES));
+        bool is_stop_flush = (!g_is_recording && g_needs_flush);
+        bool is_preempt_flush = g_preempt_requested.load();
+
+        bool trigger_segmentation = false;
+        if (g_is_recording && pcmf32.size() > 0) {
+            double duration_sec = (double)pcmf32.size() / SAMPLE_RATE;
+            bool is_quiet = (current_chunk_max_amp < 0.05f);
+            if (duration_sec > 15.0 && is_quiet) trigger_segmentation = true;
+            else if (duration_sec > 28.0) trigger_segmentation = true;
+        }
+
+        if (should_inference || is_stop_flush || is_preempt_flush || trigger_segmentation) {
+            if (is_stop_flush) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                if (active == SourceKind::PC) {
+                    mic.get(params.chunk_size, pcmf32_audio);
+                } else if (active == SourceKind::Phone) {
+                    sock.get(params.chunk_size, pcmf32_audio);
+                }
+
+                if (!pcmf32_audio.empty()) {
+                    pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                    if (params.save_audio) {
+                        full_session_audio.insert(full_session_audio.end(), pcmf32_audio.begin(), pcmf32_audio.end());
+                    }
+                    pcmf32_audio.clear();
+                }
+            }
+
+            int process_len = (int)pcmf32.size();
+            if (process_len > 0) {
+                if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
+                    if (trigger_segmentation) std::cout << "SEG: ";
+                    else std::cout << "RES: ";
+
+                    sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
+                    std::cout << std::endl;
+
+                    idenitified_floats = process_len;
+                }
+            }
+
+            if (trigger_segmentation) {
+                pcmf32.clear();
+                idenitified_floats = 0;
+            }
+
+            if (is_preempt_flush) {
+                g_preempt_requested = false;
+                pcmf32_audio.clear();
+                pcmf32.clear();
+                idenitified_floats = 0;
+                current_chunk_max_amp = 0.0f;
+                if (params.save_audio) {
+                    full_session_audio.clear();
+                }
+            }
+
+            if (is_stop_flush) {
+                if (params.save_audio) {
+                    std::time_t now = std::time(nullptr);
+                    struct tm tstruct;
+                    char buf[80];
+                    localtime_s(&tstruct, &now);
+                    std::strftime(buf, sizeof(buf), "_%Y-%m-%d_%H-%M-%S", &tstruct);
+
+                    std::string final_path = params.audio_path;
+                    size_t lastindex = final_path.find_last_of(".");
+                    if (lastindex == std::string::npos) {
+                        final_path += buf;
+                        final_path += ".wav";
+                    } else {
+                        final_path.insert(lastindex, buf);
+                    }
+                    write_wav_file(final_path, full_session_audio, SAMPLE_RATE);
+                    full_session_audio.clear();
+                }
+
+                g_needs_flush = false;
+                pcmf32.clear();
+                idenitified_floats = 0;
+                if (active == SourceKind::PC) {
+                    mic.clear();
+                } else if (active == SourceKind::Phone) {
+                    sock.clear();
+                }
+                std::cout << "[[STOPPED]]" << std::endl;
+            }
+        }
+
+        if (!g_is_recording && !g_needs_flush && !g_preempt_requested) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+
+    sense_voice_free_stream(ctx);
+}
+
+// ==========================================
 // 【Zian Link】基于 socket 音频的工作线程
 // ==========================================
 void AudioWorkerSocket(sense_voice_stream_params params, audio_socket& sock) {
@@ -617,6 +916,81 @@ int run_input_mode(int argc, char **argv) {
     sense_voice_stream_params params;
     if (!get_stream_params(argc, argv, params)) return 1;
 
+    // 【Zian Link】双输入模式（SDL + Socket）
+    if (params.dual_audio) {
+        std::cerr << "[ZianCore] 启用双输入模式 (SDL + Socket), 端口: " << params.socket_port << std::endl;
+
+        audio_socket sock_audio(SENSE_VOICE_SAMPLE_RATE);
+        if (!sock_audio.init(params.socket_port)) {
+            std::cerr << "[ZianCore] audio_socket 初始化失败" << std::endl;
+            return 1;
+        }
+
+        sdl_mic_source mic_audio(params.chunk_size);
+        if (!mic_audio.init(params.capture_id, SENSE_VOICE_SAMPLE_RATE)) {
+            std::cerr << "[ZianCore] SDL 麦克风初始化失败" << std::endl;
+            return 1;
+        }
+        mic_audio.set_idle(true);
+        sock_audio.set_idle(true);
+
+        mic_audio.start();
+
+        std::thread worker([&params, &mic_audio, &sock_audio]() {
+            AudioWorkerDual(params, mic_audio, sock_audio);
+        });
+
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+                line.pop_back();
+            }
+
+            ParsedCommand cmd = parse_command(line);
+            if (cmd.type == CommandType::Exit) {
+                g_should_exit = true;
+                break;
+            }
+
+            if (cmd.type == CommandType::Start) {
+                SourceKind src = cmd.has_source ? cmd.source : SourceKind::PC;
+                if (src == SourceKind::None) src = SourceKind::PC;
+
+                SourceKind current = static_cast<SourceKind>(g_active_source.load());
+                if (g_is_recording && current != SourceKind::None && current != src) {
+                    g_preempt_requested = true;
+                }
+
+                g_active_source = static_cast<int>(src);
+                if (src == SourceKind::PC) {
+                    mic_audio.set_idle(false);
+                    sock_audio.set_idle(true);
+                    mic_audio.clear();
+                } else if (src == SourceKind::Phone) {
+                    mic_audio.set_idle(true);
+                    sock_audio.set_idle(false);
+                    sock_audio.clear();
+                }
+
+                g_is_recording = true;
+                g_needs_flush = false;
+            } else if (cmd.type == CommandType::Stop) {
+                SourceKind current = static_cast<SourceKind>(g_active_source.load());
+                SourceKind src = cmd.has_source ? cmd.source : current;
+
+                if (src != SourceKind::None && src == current && g_is_recording) {
+                    g_is_recording = false;
+                    g_needs_flush = true;
+                }
+            }
+        }
+
+        if (worker.joinable()) worker.join();
+        mic_audio.stop();
+        sock_audio.stop();
+        return 0;
+    }
+
     // 【Zian Link】socket 音频模式（手机麦克风）
     if (params.socket_audio) {
         std::cerr << "[ZianCore] 启用 socket 音频输入模式, 端口: " << params.socket_port << std::endl;
@@ -637,17 +1011,25 @@ int run_input_mode(int argc, char **argv) {
                 line.pop_back();
             }
 
-            if (line == "START") {
-                g_is_recording = true;
-                g_needs_flush = false;
-            } 
-            else if (line == "STOP") {
-                g_is_recording = false;
-                g_needs_flush = true;
-            }
-            else if (line == "EXIT") {
+            ParsedCommand cmd = parse_command(line);
+            if (cmd.type == CommandType::Exit) {
                 g_should_exit = true;
                 break;
+            }
+
+            if (cmd.type == CommandType::Start) {
+                SourceKind src = cmd.has_source ? cmd.source : SourceKind::Phone;
+                if (src == SourceKind::Phone) {
+                    g_active_source = static_cast<int>(SourceKind::Phone);
+                    g_is_recording = true;
+                    g_needs_flush = false;
+                }
+            } else if (cmd.type == CommandType::Stop) {
+                SourceKind src = cmd.has_source ? cmd.source : SourceKind::Phone;
+                if (src == SourceKind::Phone) {
+                    g_is_recording = false;
+                    g_needs_flush = true;
+                }
             }
         }
 

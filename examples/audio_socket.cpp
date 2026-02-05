@@ -11,7 +11,7 @@
 extern std::atomic<bool> g_should_exit;
 
 audio_socket::audio_socket(int sample_rate)
-    : m_sample_rate(sample_rate), m_running(false) {
+    : m_sample_rate(sample_rate), m_running(false), m_buffer(static_cast<size_t>(sample_rate) * 30) {
 }
 
 audio_socket::~audio_socket() {
@@ -118,34 +118,23 @@ void audio_socket::handle_client(int client_socket) {
 void audio_socket::push_pcm16(const int16_t* data, size_t sample_count) {
     if (sample_count == 0) return;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<float> samples(sample_count);
     for (size_t i = 0; i < sample_count; ++i) {
-        float sample = static_cast<float>(data[i]) / 32768.0f;
-        m_buffer.push_back(sample);
+        samples[i] = static_cast<float>(data[i]) / 32768.0f;
     }
 
-    const size_t max_samples = static_cast<size_t>(m_sample_rate) * 30;
-    if (m_buffer.size() > max_samples) {
-        m_buffer.erase(m_buffer.begin(), m_buffer.begin() + (m_buffer.size() - max_samples));
-    }
+    m_buffer.push(samples);
 }
 
 void audio_socket::get(int ms, std::vector<float>& audio) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-
     size_t samples_needed = (static_cast<size_t>(m_sample_rate) * ms) / 1000;
-    if (m_buffer.size() >= samples_needed) {
-        audio.assign(m_buffer.begin(), m_buffer.begin() + samples_needed);
-        m_buffer.erase(m_buffer.begin(), m_buffer.begin() + samples_needed);
-    } else if (!m_buffer.empty()) {
-        audio.assign(m_buffer.begin(), m_buffer.end());
-        m_buffer.clear();
-    } else {
-        audio.clear();
-    }
+    m_buffer.read(samples_needed, audio, 20);
 }
 
 void audio_socket::clear() {
-    std::lock_guard<std::mutex> lock(m_mutex);
     m_buffer.clear();
+}
+
+void audio_socket::set_idle(bool idle) {
+    m_buffer.set_overwrite_oldest(idle);
 }

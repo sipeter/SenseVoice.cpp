@@ -1,9 +1,10 @@
 #pragma once
 
 #include <atomic>
-#include <mutex>
 #include <thread>
 #include <vector>
+
+#include "ring_buffer.h"
 
 class audio_socket {
 public:
@@ -15,6 +16,7 @@ public:
 
     void get(int ms, std::vector<float>& audio);
     void clear();
+    void set_idle(bool idle);
 
 private:
     void server_thread(int port);
@@ -24,6 +26,5 @@ private:
     int m_sample_rate;
     std::atomic<bool> m_running;
     std::thread m_thread;
-    std::mutex m_mutex;
-    std::vector<float> m_buffer;
+    RingBuffer<float> m_buffer;
 };
