@@ -31,6 +31,7 @@ if(SDL2_FOUND)
         zcr_main/main.cc 
         stream/stream.cc
         audio_pipe.cpp
+        audio_socket.cpp
     )
     # 添加 include 目录（从原 stream 和 zcr_main 的 CMakeLists.txt 复制）
     target_include_directories(ZianCore PRIVATE 
