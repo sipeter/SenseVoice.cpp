@@ -32,6 +32,7 @@ bool audio_socket::init(int port) {
     m_running = true;
     m_thread = std::thread(&audio_socket::server_thread, this, port);
     std::cerr << "[audio_socket] 监听端口: " << port << std::endl;
+    std::cout << "[[AUDIO_SOCKET_READY:" << port << "]]" << std::endl;
     return true;
 }
 
