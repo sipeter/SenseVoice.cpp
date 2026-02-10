@@ -54,6 +54,10 @@ void audio_socket::server_thread(int port) {
         return;
     }
 
+    // 【P3-严重Bug修复】允许端口复用，避免重启后 bind 失败
+    int optval = 1;
+    setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&optval, sizeof(optval));
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
@@ -80,6 +84,12 @@ void audio_socket::server_thread(int port) {
             std::cerr << "[audio_socket] accept 失败" << std::endl;
             continue;
         }
+
+        // 【P3-严重Bug修复】设置 recv 超时 5 秒
+        // WiFi 断开时，recv() 不会永远阻塞，最多 5 秒后返回错误
+        // 然后 handle_client 退出，server_thread 可以回到 accept() 接受新连接
+        DWORD timeout = 5000;
+        setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
         std::cerr << "[audio_socket] 客户端已连接" << std::endl;
         handle_client(static_cast<int>(clientSock));
