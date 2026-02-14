@@ -452,20 +452,37 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
         }
         
         // 定期清理已处理的缓冲区数据，防止内存无限增长
+        // 注意：若存在未闭合语音段（L_nomute >= 0），不能裁掉该段起点之前的必要上下文，
+        // 否则会把正在构建的句子“截断并丢失”。
         if (processed_samples > 0 && audio_buffer.size() > 2 * max_nomute_step) {
-            std::vector<float> temp_buffer(audio_buffer.begin() + processed_samples, audio_buffer.end());
-            audio_buffer = std::move(temp_buffer);
-            
-            // 调整位置索引
-            L_nomute -= processed_samples;
-            L_mute -= processed_samples;
-            R_mute -= processed_samples;
-            if (L_nomute < 0 && L_nomute != -1) L_nomute = -1;
-            if (L_mute < 0 && L_mute != -1) L_mute = -1;
-            if (R_mute < 0 && R_mute != -1) R_mute = -1;
-            
-            global_offset += processed_samples;
-            processed_samples = 0;
+            int trim_samples = processed_samples;
+            if (L_nomute >= 0) {
+                trim_samples = std::min(trim_samples, L_nomute);
+            }
+
+            if (trim_samples > 0) {
+                std::vector<float> temp_buffer(audio_buffer.begin() + trim_samples, audio_buffer.end());
+                audio_buffer = std::move(temp_buffer);
+
+                // 调整位置索引
+                if (L_nomute >= 0) {
+                    L_nomute -= trim_samples;
+                }
+                if (L_mute >= 0) {
+                    L_mute -= trim_samples;
+                }
+                if (R_mute >= 0) {
+                    R_mute -= trim_samples;
+                }
+
+                if (L_nomute < -1) L_nomute = -1;
+                if (L_mute < -1) L_mute = -1;
+                if (R_mute < -1) R_mute = -1;
+
+                global_offset += trim_samples;
+                processed_samples -= trim_samples;
+                if (processed_samples < 0) processed_samples = 0;
+            }
         }
     }
 
