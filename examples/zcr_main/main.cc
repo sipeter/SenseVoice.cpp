@@ -363,6 +363,7 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
     std::vector<float> chunk_data;
     const size_t chunk_samples = n_sample_step;
     int processed_samples = 0;
+    size_t global_offset = 0;  // 累计已裁剪的样本数，用于绝对时间计算
 
     // 逐块读取音频数据
     while (read_audio_chunk(file, chunk_data, chunk_samples)) {
@@ -402,8 +403,8 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
             if (L_nomute >= 0 && R_this_chunk - L_nomute >= max_nomute_step) {
                 int R_nomute = L_mute >= 0 && L_mute >= L_nomute ? L_mute : R_this_chunk;
                 sense_voice_segment segment;
-                segment.t0 = L_nomute;
-                segment.t1 = R_nomute;
+                segment.t0 = L_nomute + global_offset;
+                segment.t1 = R_nomute + global_offset;
                 segment.samples = std::vector<float>(audio_buffer.begin() + L_nomute, audio_buffer.begin() + R_nomute);
 
                 size_t segment_size = segment.samples.size();
@@ -429,8 +430,8 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
                 R_mute = R_this_chunk;
                 if (L_mute >= L_nomute && L_nomute >= 0 && R_this_chunk - L_mute >= keep_nomute_step) {
                     sense_voice_segment segment;
-                    segment.t0 = L_nomute;
-                    segment.t1 = L_mute;
+                    segment.t0 = L_nomute + global_offset;
+                    segment.t1 = L_mute + global_offset;
                     segment.samples = std::vector<float>(audio_buffer.begin() + L_nomute, audio_buffer.begin() + L_mute);
 
                     size_t segment_size = segment.samples.size();
@@ -463,6 +464,7 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
             if (L_mute < 0 && L_mute != -1) L_mute = -1;
             if (R_mute < 0 && R_mute != -1) R_mute = -1;
             
+            global_offset += processed_samples;
             processed_samples = 0;
         }
     }
@@ -470,8 +472,8 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
     // 处理最后一段
     if (L_nomute >= 0 && L_nomute < (int)audio_buffer.size()) {
         sense_voice_segment segment;
-        segment.t0 = L_nomute;
-        segment.t1 = audio_buffer.size();
+        segment.t0 = L_nomute + global_offset;
+        segment.t1 = audio_buffer.size() + global_offset;
         segment.samples = std::vector<float>(audio_buffer.begin() + L_nomute, audio_buffer.end());
 
         size_t segment_size = segment.samples.size();
