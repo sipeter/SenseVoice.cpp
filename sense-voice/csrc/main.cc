@@ -105,18 +105,7 @@ const char * sense_voice_print_system_info(void) {
     static std::string s;
 
     s  = "";
-    s += "AVX = "       + std::to_string(ggml_cpu_has_avx())       + " | ";
-    s += "AVX2 = "      + std::to_string(ggml_cpu_has_avx2())      + " | ";
-    s += "AVX512 = "    + std::to_string(ggml_cpu_has_avx512())    + " | ";
-    s += "FMA = "       + std::to_string(ggml_cpu_has_fma())       + " | ";
-    s += "NEON = "      + std::to_string(ggml_cpu_has_neon())      + " | ";
-    s += "ARM_FMA = "   + std::to_string(ggml_cpu_has_arm_fma())   + " | ";
-    s += "F16C = "      + std::to_string(ggml_cpu_has_f16c())      + " | ";
-    s += "FP16_VA = "   + std::to_string(ggml_cpu_has_fp16_va())   + " | ";
-    s += "WASM_SIMD = " + std::to_string(ggml_cpu_has_wasm_simd()) + " | ";
-    s += "SSE3 = "      + std::to_string(ggml_cpu_has_sse3())      + " | ";
-    s += "SSSE3 = "     + std::to_string(ggml_cpu_has_ssse3())     + " | ";
-    s += "VSX = "       + std::to_string(ggml_cpu_has_vsx())       + " | ";
+    s += "BACKEND_DL = 1 | ";
     s += "COREML = "    + std::to_string(sense_voice_has_coreml()) + " | ";
     s += "OPENVINO = "  + std::to_string(sense_voice_has_openvino());
 

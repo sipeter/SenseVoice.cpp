@@ -927,10 +927,44 @@ int run_input_mode(int argc, char **argv) {
         }
 
         sdl_mic_source mic_audio(params.chunk_size);
-        if (!mic_audio.init(params.capture_id, SENSE_VOICE_SAMPLE_RATE)) {
-            std::cerr << "[ZianCore] SDL 麦克风初始化失败" << std::endl;
-            return 1;
+        bool mic_available = mic_audio.init(params.capture_id, SENSE_VOICE_SAMPLE_RATE);
+
+        if (!mic_available) {
+            // SDL 麦克风不可用（无音频采集设备），降级为仅 Socket 模式
+            std::cerr << "[ZianCore] [WARNING] SDL 麦克风不可用，降级为仅 Socket 模式" << std::endl;
+
+            std::thread worker([&params, &sock_audio]() {
+                AudioWorkerSocket(params, sock_audio);
+            });
+
+            std::string line;
+            while (std::getline(std::cin, line)) {
+                while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+                    line.pop_back();
+                }
+
+                ParsedCommand cmd = parse_command(line);
+                if (cmd.type == CommandType::Exit) {
+                    g_should_exit = true;
+                    break;
+                }
+
+                if (cmd.type == CommandType::Start) {
+                    g_active_source = static_cast<int>(SourceKind::Phone);
+                    g_is_recording = true;
+                    g_needs_flush = false;
+                } else if (cmd.type == CommandType::Stop) {
+                    g_is_recording = false;
+                    g_needs_flush = true;
+                }
+            }
+
+            if (worker.joinable()) worker.join();
+            sock_audio.stop();
+            return 0;
         }
+
+        // SDL 麦克风可用，正常双输入模式
         mic_audio.set_idle(true);
         sock_audio.set_idle(true);
 

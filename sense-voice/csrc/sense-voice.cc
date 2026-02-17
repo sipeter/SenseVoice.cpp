@@ -358,6 +358,9 @@ struct sense_voice_context *sense_voice_init_with_params_no_state(
         const char *path_model, sense_voice_context_params params) {
     ggml_time_init();
 
+    // GGML_BACKEND_DL: dynamically discover and load backend plugins (ggml-cpu.dll, ggml-cuda.dll, etc.)
+    ggml_backend_load_all();
+
     SENSE_VOICE_LOG_INFO("%s: use gpu    = %d\n", __func__, params.use_gpu);
     SENSE_VOICE_LOG_INFO("%s: flash attn = %d\n", __func__, params.flash_attn);
     SENSE_VOICE_LOG_INFO("%s: gpu_device = %d\n", __func__, params.gpu_device);
