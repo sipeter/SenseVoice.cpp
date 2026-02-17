@@ -359,7 +359,13 @@ struct sense_voice_context *sense_voice_init_with_params_no_state(
     ggml_time_init();
 
     // GGML_BACKEND_DL: dynamically discover and load backend plugins (ggml-cpu.dll, ggml-cuda.dll, etc.)
-    ggml_backend_load_all();
+    // 【v0.9.2.5 修复】当 use_gpu == false (-ng) 时，只加载 CPU 后端
+    // 避免在虚拟机中加载 ggml-cuda.dll 导致 cuInit() 卡死（Hyper-V 虚拟 GPU 适配器问题）
+    if (params.use_gpu) {
+        ggml_backend_load_all();
+    } else {
+        ggml_backend_load("ggml-cpu");
+    }
 
     SENSE_VOICE_LOG_INFO("%s: use gpu    = %d\n", __func__, params.use_gpu);
     SENSE_VOICE_LOG_INFO("%s: flash attn = %d\n", __func__, params.flash_attn);

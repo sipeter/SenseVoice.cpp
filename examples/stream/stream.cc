@@ -310,12 +310,15 @@ static ParsedCommand parse_command(const std::string& line) {
 // 核心逻辑：音频工作线程
 // ==========================================
 void AudioWorker(sense_voice_stream_params params) {
+    bool mic_available = true;
     audio_async audio(params.chunk_size << 2);
     if (!audio.init(params.capture_id, SENSE_VOICE_SAMPLE_RATE)) {
-        fprintf(stderr, "Error: Audio init failed!\n");
-        return;
+        // 【v0.9.2.5 修复】SDL 初始化失败时不再直接 return
+        // 而是继续加载模型，输出 ENGINE_READY，避免 C# 端永远等待
+        fprintf(stderr, "[ZianCore] [WARNING] SDL microphone init failed, no local audio input available\n");
+        mic_available = false;
     }
-    audio.resume();
+    if (mic_available) audio.resume();
 
     struct sense_voice_context_params cparams = sense_voice_context_default_params();
     cparams.use_gpu = params.use_gpu;
@@ -353,7 +356,7 @@ void AudioWorker(sense_voice_stream_params params) {
 
     while (!g_should_exit) {
         // A. 录音状态
-        if (g_is_recording) {
+        if (g_is_recording && mic_available) {
             audio.get(params.chunk_size, pcmf32_audio);
             if (!pcmf32_audio.empty()) {
                 
@@ -462,7 +465,7 @@ void AudioWorker(sense_voice_stream_params params) {
                 g_needs_flush = false; 
                 pcmf32.clear();
                 idenitified_floats = 0;
-                audio.clear(); 
+                if (mic_available) audio.clear(); 
                 std::cout << "[[STOPPED]]" << std::endl; 
             }
         }
