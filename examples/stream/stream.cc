@@ -1,3 +1,11 @@
+/**
+ * @file stream.cc - ZianCore 流式数据处理核心，负责实时流切分及多路音频路由
+ * @version 0.9.2.5
+ * @description ZianCore 流式数据处理核心，负责实时流切分及多路音频路由
+ * @copyright Copyright © 2026 孙文波. All rights reserved.
+ * @author 孙文波
+ * @license 专有软件, 未经授权不得使用
+ */
 /*
  * Modified stream.cc for Windows Offline Voice Input (Geek Edition)
  * 包含功能：

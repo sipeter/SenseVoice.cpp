@@ -1,3 +1,11 @@
+/**
+ * @file main.cc - ZianCore 主入口与参数分发，文件转写模式核心流
+ * @version 0.9.2.5
+ * @description ZianCore 主入口与参数分发，文件转写模式核心流
+ * @copyright Copyright © 2026 孙文波. All rights reserved.
+ * @author 孙文波
+ * @license 专有软件, 未经授权不得使用
+ */
 //
 // Created by lovemefan on 2024/7/21.
 //
