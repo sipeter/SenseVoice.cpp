@@ -470,7 +470,8 @@ void AudioWorker(sense_voice_stream_params params) {
     
     // 分段逻辑变量
     const int SAMPLE_RATE = SENSE_VOICE_SAMPLE_RATE;
-    float current_chunk_max_amp = 0.0f; 
+    float current_chunk_max_amp = 0.0f;
+    float session_max_amp = 0.0f; // 【VAD】整次录音会话的最大振幅
 
     std::cout << "[[ENGINE_READY]]" << std::endl;
 
@@ -486,6 +487,7 @@ void AudioWorker(sense_voice_stream_params params) {
                 // 2. 计算音量 (用于分段)
                 current_chunk_max_amp = 0.0f;
                 for(float f : pcmf32_audio) current_chunk_max_amp = std::max(current_chunk_max_amp, std::abs(f));
+                session_max_amp = std::max(session_max_amp, current_chunk_max_amp); // 【VAD】跟踪整次会话最大振幅
 
                 // 3. 存入推理 Buffer
                 pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
@@ -541,11 +543,13 @@ void AudioWorker(sense_voice_stream_params params) {
             int process_len = (int)pcmf32.size(); 
             if (process_len > 0) {
                 // VAD 静音检测：在最终冲刷时检查是否有人声
+                // 【修复】只有整次会话的最大振幅极低（纯静音/环境噪声）才走 VAD
+                // 耳语模式等轻声语音振幅 > 0.02，直接走 ASR
                 bool skip_inference = false;
-                if (is_final_flush && params.use_vad) {
+                if (is_final_flush && params.use_vad && session_max_amp < 0.02f) {
                     bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
                     if (!has_speech) {
-                        fprintf(stderr, "[ZianCore] VAD: no speech detected, skipping ASR\n");
+                        fprintf(stderr, "[ZianCore] VAD: no speech detected (session_max_amp=%.4f), skipping ASR\n", session_max_amp);
                         std::cout << "EMPTY:" << std::endl;
                         skip_inference = true;
                     }
@@ -598,6 +602,7 @@ void AudioWorker(sense_voice_stream_params params) {
                 g_needs_flush = false; 
                 pcmf32.clear();
                 idenitified_floats = 0;
+                session_max_amp = 0.0f; // 【VAD】重置会话振幅
                 if (mic_available) audio.clear(); 
                 std::cout << "[[STOPPED]]" << std::endl; 
             }
@@ -650,6 +655,7 @@ void AudioWorkerPipe(sense_voice_stream_params params, audio_pipe& pipe) {
     int idenitified_floats = 0;
     const int SAMPLE_RATE = SENSE_VOICE_SAMPLE_RATE;
     float current_chunk_max_amp = 0.0f;
+    float session_max_amp = 0.0f; // 【VAD】整次录音会话的最大振幅
 
     std::cout << "[[ENGINE_READY]]" << std::endl;
 
@@ -660,6 +666,7 @@ void AudioWorkerPipe(sense_voice_stream_params params, audio_pipe& pipe) {
             if (!pcmf32_audio.empty()) {
                 current_chunk_max_amp = 0.0f;
                 for(float f : pcmf32_audio) current_chunk_max_amp = std::max(current_chunk_max_amp, std::abs(f));
+                session_max_amp = std::max(session_max_amp, current_chunk_max_amp); // 【VAD】
 
                 pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
                 
@@ -704,10 +711,10 @@ void AudioWorkerPipe(sense_voice_stream_params params, audio_pipe& pipe) {
             if (process_len > 0) {
                 // VAD 静音检测
                 bool skip_inference = false;
-                if (is_final_flush && params.use_vad) {
+                if (is_final_flush && params.use_vad && session_max_amp < 0.02f) {
                     bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
                     if (!has_speech) {
-                        fprintf(stderr, "[ZianCore] VAD: no speech detected, skipping ASR\n");
+                        fprintf(stderr, "[ZianCore] VAD: no speech detected (session_max_amp=%.4f), skipping ASR\n", session_max_amp);
                         std::cout << "EMPTY:" << std::endl;
                         skip_inference = true;
                     }
@@ -754,6 +761,7 @@ void AudioWorkerPipe(sense_voice_stream_params params, audio_pipe& pipe) {
                 g_needs_flush = false;
                 pcmf32.clear();
                 idenitified_floats = 0;
+                session_max_amp = 0.0f; // 【VAD】重置会话振幅
                 pipe.clear();
                 std::cout << "[[STOPPED]]" << std::endl;
             }
@@ -806,6 +814,7 @@ void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audi
     int idenitified_floats = 0;
     const int SAMPLE_RATE = SENSE_VOICE_SAMPLE_RATE;
     float current_chunk_max_amp = 0.0f;
+    float session_max_amp = 0.0f; // 【VAD】整次录音会话的最大振幅
 
     std::cout << "[[ENGINE_READY]]" << std::endl;
 
@@ -822,6 +831,7 @@ void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audi
             if (!pcmf32_audio.empty()) {
                 current_chunk_max_amp = 0.0f;
                 for (float f : pcmf32_audio) current_chunk_max_amp = std::max(current_chunk_max_amp, std::abs(f));
+                session_max_amp = std::max(session_max_amp, current_chunk_max_amp); // 【VAD】
 
                 pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
 
@@ -870,10 +880,10 @@ void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audi
             if (process_len > 0) {
                 // VAD 静音检测
                 bool skip_inference = false;
-                if (is_stop_flush && params.use_vad) {
+                if (is_stop_flush && params.use_vad && session_max_amp < 0.02f) {
                     bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
                     if (!has_speech) {
-                        fprintf(stderr, "[ZianCore] VAD: no speech detected, skipping ASR\n");
+                        fprintf(stderr, "[ZianCore] VAD: no speech detected (session_max_amp=%.4f), skipping ASR\n", session_max_amp);
                         std::cout << "EMPTY:" << std::endl;
                         skip_inference = true;
                     }
@@ -903,6 +913,7 @@ void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audi
                 pcmf32.clear();
                 idenitified_floats = 0;
                 current_chunk_max_amp = 0.0f;
+                session_max_amp = 0.0f; // 【VAD】抢占时也重置
                 if (params.save_audio) {
                     full_session_audio.clear();
                 }
@@ -931,6 +942,7 @@ void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audi
                 g_needs_flush = false;
                 pcmf32.clear();
                 idenitified_floats = 0;
+                session_max_amp = 0.0f; // 【VAD】重置会话振幅
                 if (active == SourceKind::PC) {
                     mic.clear();
                 } else if (active == SourceKind::Phone) {
@@ -987,6 +999,7 @@ void AudioWorkerSocket(sense_voice_stream_params params, audio_socket& sock) {
     int idenitified_floats = 0;
     const int SAMPLE_RATE = SENSE_VOICE_SAMPLE_RATE;
     float current_chunk_max_amp = 0.0f;
+    float session_max_amp = 0.0f; // 【VAD】整次录音会话的最大振幅
 
     std::cout << "[[ENGINE_READY]]" << std::endl;
 
@@ -996,6 +1009,7 @@ void AudioWorkerSocket(sense_voice_stream_params params, audio_socket& sock) {
             if (!pcmf32_audio.empty()) {
                 current_chunk_max_amp = 0.0f;
                 for(float f : pcmf32_audio) current_chunk_max_amp = std::max(current_chunk_max_amp, std::abs(f));
+                session_max_amp = std::max(session_max_amp, current_chunk_max_amp); // 【VAD】
 
                 pcmf32.insert(pcmf32.end(), pcmf32_audio.begin(), pcmf32_audio.end());
 
@@ -1038,10 +1052,10 @@ void AudioWorkerSocket(sense_voice_stream_params params, audio_socket& sock) {
             if (process_len > 0) {
                 // VAD 静音检测
                 bool skip_inference = false;
-                if (is_final_flush && params.use_vad) {
+                if (is_final_flush && params.use_vad && session_max_amp < 0.02f) {
                     bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
                     if (!has_speech) {
-                        fprintf(stderr, "[ZianCore] VAD: no speech detected, skipping ASR\n");
+                        fprintf(stderr, "[ZianCore] VAD: no speech detected (session_max_amp=%.4f), skipping ASR\n", session_max_amp);
                         std::cout << "EMPTY:" << std::endl;
                         skip_inference = true;
                     }
@@ -1088,6 +1102,7 @@ void AudioWorkerSocket(sense_voice_stream_params params, audio_socket& sock) {
                 g_needs_flush = false;
                 pcmf32.clear();
                 idenitified_floats = 0;
+                session_max_amp = 0.0f; // 【VAD】重置会话振幅
                 sock.clear();
                 std::cout << "[[STOPPED]]" << std::endl;
             }
