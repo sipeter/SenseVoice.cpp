@@ -315,6 +315,113 @@ static ParsedCommand parse_command(const std::string& line) {
 }
 
 // ==========================================
+// VAD 静音检测常量与辅助函数
+// ==========================================
+#define VAD_CHUNK_SIZE 512
+#define VAD_CONTEXT_SIZE 576
+#define VAD_CHUNK_PAD_SIZE 64
+#define VAD_LSTM_STATE_MEMORY_SIZE 2048
+#define VAD_LSTM_STATE_DIM 128
+
+/**
+ * 初始化 VAD LSTM 状态（sense_voice_small_init_from_file_with_params 不会初始化）
+ * 必须在模型加载后 + 第一次调用 VAD 之前执行
+ */
+static void vad_init_lstm_state(sense_voice_context* ctx) {
+    auto* state = ctx->state;
+    state->vad_ctx = ggml_init({VAD_LSTM_STATE_MEMORY_SIZE, nullptr, true});
+
+    state->vad_lstm_context = ggml_new_tensor_1d(
+        state->vad_ctx, GGML_TYPE_F32, VAD_LSTM_STATE_DIM);
+    state->vad_lstm_hidden_state = ggml_new_tensor_1d(
+        state->vad_ctx, GGML_TYPE_F32, VAD_LSTM_STATE_DIM);
+
+    state->vad_lstm_context_buffer = ggml_backend_alloc_buffer(
+        state->backends[0],
+        ggml_nbytes(state->vad_lstm_context)
+            + ggml_backend_get_alignment(state->backends[0]));
+    state->vad_lstm_hidden_state_buffer = ggml_backend_alloc_buffer(
+        state->backends[0],
+        ggml_nbytes(state->vad_lstm_hidden_state)
+            + ggml_backend_get_alignment(state->backends[0]));
+
+    auto context_alloc = ggml_tallocr_new(state->vad_lstm_context_buffer);
+    ggml_tallocr_alloc(&context_alloc, state->vad_lstm_context);
+
+    auto state_alloc = ggml_tallocr_new(state->vad_lstm_hidden_state_buffer);
+    ggml_tallocr_alloc(&state_alloc, state->vad_lstm_hidden_state);
+
+    ggml_set_zero(state->vad_lstm_context);
+    ggml_set_zero(state->vad_lstm_hidden_state);
+
+    fprintf(stderr, "[ZianCore] VAD LSTM state initialized\n");
+}
+
+/**
+ * 重置 VAD LSTM 状态（每次新的检测之前调用）
+ */
+static void vad_reset_lstm_state(sense_voice_context* ctx) {
+    auto* state = ctx->state;
+    if (state->vad_lstm_hidden_state_buffer) {
+        ggml_backend_buffer_clear(state->vad_lstm_hidden_state_buffer, 0);
+    }
+    if (state->vad_lstm_context_buffer) {
+        ggml_backend_buffer_clear(state->vad_lstm_context_buffer, 0);
+    }
+}
+
+/**
+ * 对整段音频做 VAD 检测，返回是否包含人声
+ * 
+ * 将音频分成 VAD_CHUNK_SIZE (512) sample 帧，逐帧调用 silero_vad_encode_internal()
+ * 如果任何一帧的 speech_prob >= 阈值(0.5)，则判定有人声。
+ *
+ * 注意：stream.cc 的 pcmf32 是 double 类型，音频值范围 [-1.0, 1.0]（来自 SDL）
+ *       而 main.cc 的 pcmf32 是 double 类型，值为 raw int16（需除以 32768）
+ *       所以这里不需要除以 32768
+ */
+static bool vad_check_has_speech(sense_voice_context* ctx,
+                                  const std::vector<double>& pcmf32,
+                                  int n_threads) {
+    const float SPEECH_THRESHOLD = 0.5f;
+    const int offset = VAD_CHUNK_SIZE - VAD_CONTEXT_SIZE; // -64
+
+    // 重置 LSTM 状态
+    vad_reset_lstm_state(ctx);
+
+    std::vector<float> chunk(VAD_CONTEXT_SIZE + VAD_CHUNK_PAD_SIZE, 0);
+
+    for (int i = 0; i < (int)pcmf32.size(); i += VAD_CHUNK_SIZE) {
+        int n_pad = VAD_CHUNK_SIZE <= (int)pcmf32.size() - i
+                        ? 0
+                        : VAD_CHUNK_SIZE + i - (int)pcmf32.size();
+
+        // 填充 chunk（参考 main.cc 逻辑）
+        for (int j = i + offset; j < i + VAD_CHUNK_SIZE; j++) {
+            if (j > 0 && j < i + VAD_CONTEXT_SIZE - n_pad && j < (int)pcmf32.size()) {
+                // stream.cc 数据已经是 float [-1, 1]，不需要除以 32768
+                chunk[j - i - offset] = (float)pcmf32[j];
+            } else {
+                chunk[j - i - offset] = 0;
+            }
+        }
+        // reflection pad
+        for (int j = VAD_CONTEXT_SIZE; j < (int)chunk.size(); j++) {
+            chunk[j] = chunk[2 * VAD_CONTEXT_SIZE - j - 2];
+        }
+
+        float speech_prob = 0;
+        if (silero_vad_encode_internal(*ctx, *ctx->state, chunk, n_threads, speech_prob)) {
+            if (speech_prob >= SPEECH_THRESHOLD) {
+                return true;  // 检测到人声，提前返回
+            }
+        }
+    }
+    return false;  // 全程无人声
+}
+
+
+// ==========================================
 // 核心逻辑：音频工作线程
 // ==========================================
 void AudioWorker(sense_voice_stream_params params) {
@@ -338,6 +445,11 @@ void AudioWorker(sense_voice_stream_params params) {
 
     ctx->language_id = sense_voice_lang_id(params.language.c_str());
     if (ctx->language_id == -1) ctx->language_id = sense_voice_lang_id("auto");
+
+    // VAD LSTM 状态初始化
+    if (params.use_vad) {
+        vad_init_lstm_state(ctx);
+    }
 
     std::vector<float> pcmf32_audio; // 临时接收音频 (Chunk)
     std::vector<double> pcmf32;      // 累积音频用于推理 (Inference Buffer)
@@ -428,14 +540,27 @@ void AudioWorker(sense_voice_stream_params params) {
             // 执行推理
             int process_len = (int)pcmf32.size(); 
             if (process_len > 0) {
-                if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
-                    if (trigger_segmentation) std::cout << "SEG: "; 
-                    else std::cout << "RES: "; 
-                    
-                    sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
-                    std::cout << std::endl; 
-                    
-                    idenitified_floats = process_len;
+                // VAD 静音检测：在最终冲刷时检查是否有人声
+                bool skip_inference = false;
+                if (is_final_flush && params.use_vad) {
+                    bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
+                    if (!has_speech) {
+                        fprintf(stderr, "[ZianCore] VAD: no speech detected, skipping ASR\n");
+                        std::cout << "EMPTY:" << std::endl;
+                        skip_inference = true;
+                    }
+                }
+
+                if (!skip_inference) {
+                    if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
+                        if (trigger_segmentation) std::cout << "SEG: "; 
+                        else std::cout << "RES: "; 
+                        
+                        sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
+                        std::cout << std::endl; 
+                        
+                        idenitified_floats = process_len;
+                    }
                 }
             }
 
@@ -503,6 +628,11 @@ void AudioWorkerPipe(sense_voice_stream_params params, audio_pipe& pipe) {
 
     ctx->language_id = sense_voice_lang_id(params.language.c_str());
     if (ctx->language_id == -1) ctx->language_id = sense_voice_lang_id("auto");
+
+    // VAD LSTM 状态初始化
+    if (params.use_vad) {
+        vad_init_lstm_state(ctx);
+    }
 
     std::vector<float> pcmf32_audio; // 临时接收音频 (Chunk)
     std::vector<double> pcmf32;      // 累积音频用于推理 (Inference Buffer)
@@ -572,14 +702,27 @@ void AudioWorkerPipe(sense_voice_stream_params params, audio_pipe& pipe) {
 
             int process_len = (int)pcmf32.size();
             if (process_len > 0) {
-                if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
-                    if (trigger_segmentation) std::cout << "SEG: ";
-                    else std::cout << "RES: ";
-                    
-                    sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
-                    std::cout << std::endl;
-                    
-                    idenitified_floats = process_len;
+                // VAD 静音检测
+                bool skip_inference = false;
+                if (is_final_flush && params.use_vad) {
+                    bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
+                    if (!has_speech) {
+                        fprintf(stderr, "[ZianCore] VAD: no speech detected, skipping ASR\n");
+                        std::cout << "EMPTY:" << std::endl;
+                        skip_inference = true;
+                    }
+                }
+
+                if (!skip_inference) {
+                    if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
+                        if (trigger_segmentation) std::cout << "SEG: ";
+                        else std::cout << "RES: ";
+                        
+                        sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
+                        std::cout << std::endl;
+                        
+                        idenitified_floats = process_len;
+                    }
                 }
             }
 
@@ -641,6 +784,11 @@ void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audi
 
     ctx->language_id = sense_voice_lang_id(params.language.c_str());
     if (ctx->language_id == -1) ctx->language_id = sense_voice_lang_id("auto");
+
+    // VAD LSTM 状态初始化
+    if (params.use_vad) {
+        vad_init_lstm_state(ctx);
+    }
 
     std::vector<float> pcmf32_audio;
     std::vector<double> pcmf32;
@@ -720,14 +868,27 @@ void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audi
 
             int process_len = (int)pcmf32.size();
             if (process_len > 0) {
-                if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
-                    if (trigger_segmentation) std::cout << "SEG: ";
-                    else std::cout << "RES: ";
+                // VAD 静音检测
+                bool skip_inference = false;
+                if (is_stop_flush && params.use_vad) {
+                    bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
+                    if (!has_speech) {
+                        fprintf(stderr, "[ZianCore] VAD: no speech detected, skipping ASR\n");
+                        std::cout << "EMPTY:" << std::endl;
+                        skip_inference = true;
+                    }
+                }
 
-                    sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
-                    std::cout << std::endl;
+                if (!skip_inference) {
+                    if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
+                        if (trigger_segmentation) std::cout << "SEG: ";
+                        else std::cout << "RES: ";
 
-                    idenitified_floats = process_len;
+                        sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
+                        std::cout << std::endl;
+
+                        idenitified_floats = process_len;
+                    }
                 }
             }
 
@@ -805,6 +966,11 @@ void AudioWorkerSocket(sense_voice_stream_params params, audio_socket& sock) {
     ctx->language_id = sense_voice_lang_id(params.language.c_str());
     if (ctx->language_id == -1) ctx->language_id = sense_voice_lang_id("auto");
 
+    // VAD LSTM 状态初始化
+    if (params.use_vad) {
+        vad_init_lstm_state(ctx);
+    }
+
     std::vector<float> pcmf32_audio;
     std::vector<double> pcmf32;
     pcmf32.reserve(32000 * 30);
@@ -870,14 +1036,27 @@ void AudioWorkerSocket(sense_voice_stream_params params, audio_socket& sock) {
 
             int process_len = (int)pcmf32.size();
             if (process_len > 0) {
-                if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
-                    if (trigger_segmentation) std::cout << "SEG: ";
-                    else std::cout << "RES: ";
+                // VAD 静音检测
+                bool skip_inference = false;
+                if (is_final_flush && params.use_vad) {
+                    bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
+                    if (!has_speech) {
+                        fprintf(stderr, "[ZianCore] VAD: no speech detected, skipping ASR\n");
+                        std::cout << "EMPTY:" << std::endl;
+                        skip_inference = true;
+                    }
+                }
 
-                    sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
-                    std::cout << std::endl;
+                if (!skip_inference) {
+                    if (sense_voice_full_parallel(ctx, wparams, pcmf32, process_len, params.n_processors) == 0) {
+                        if (trigger_segmentation) std::cout << "SEG: ";
+                        else std::cout << "RES: ";
 
-                    idenitified_floats = process_len;
+                        sense_voice_print_output(ctx, params.use_prefix, params.use_itn, true);
+                        std::cout << std::endl;
+
+                        idenitified_floats = process_len;
+                    }
                 }
             }
 
