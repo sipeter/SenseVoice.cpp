@@ -546,6 +546,10 @@ void AudioWorker(sense_voice_stream_params params) {
                 // 【修复】只有整次会话的最大振幅极低（纯静音/环境噪声）才走 VAD
                 // 耳语模式等轻声语音振幅 > 0.02，直接走 ASR
                 bool skip_inference = false;
+                if (is_final_flush && params.use_vad) {
+                    printf("[[VAD: session_max_amp=%.4f threshold=0.02]]\n", session_max_amp);
+                    fflush(stdout);
+                }
                 if (is_final_flush && params.use_vad && session_max_amp < 0.02f) {
                     bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
                     if (!has_speech) {
