@@ -544,13 +544,13 @@ void AudioWorker(sense_voice_stream_params params) {
             if (process_len > 0) {
                 // VAD 静音检测：在最终冲刷时检查是否有人声
                 // 【修复】只有整次会话的最大振幅极低（纯静音/环境噪声）才走 VAD
-                // 耳语模式等轻声语音振幅 > 0.02，直接走 ASR
+                // 耳语模式等轻声语音振幅 > 0.002，直接走 ASR
                 bool skip_inference = false;
                 if (is_final_flush && params.use_vad) {
-                    printf("[[VAD: session_max_amp=%.4f threshold=0.02]]\n", session_max_amp);
+                    printf("[[VAD: session_max_amp=%.4f threshold=0.005]]\n", session_max_amp);
                     fflush(stdout);
                 }
-                if (is_final_flush && params.use_vad && session_max_amp < 0.02f) {
+                if (is_final_flush && params.use_vad && session_max_amp < 0.005f) {
                     bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
                     if (!has_speech) {
                         fprintf(stderr, "[ZianCore] VAD: no speech detected (session_max_amp=%.4f), skipping ASR\n", session_max_amp);
@@ -715,7 +715,11 @@ void AudioWorkerPipe(sense_voice_stream_params params, audio_pipe& pipe) {
             if (process_len > 0) {
                 // VAD 静音检测
                 bool skip_inference = false;
-                if (is_final_flush && params.use_vad && session_max_amp < 0.02f) {
+                if (is_final_flush && params.use_vad) {
+                    printf("[[VAD: session_max_amp=%.4f threshold=0.005]]\n", session_max_amp);
+                    fflush(stdout);
+                }
+                if (is_final_flush && params.use_vad && session_max_amp < 0.005f) {
                     bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
                     if (!has_speech) {
                         fprintf(stderr, "[ZianCore] VAD: no speech detected (session_max_amp=%.4f), skipping ASR\n", session_max_amp);
@@ -884,7 +888,11 @@ void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audi
             if (process_len > 0) {
                 // VAD 静音检测
                 bool skip_inference = false;
-                if (is_stop_flush && params.use_vad && session_max_amp < 0.02f) {
+                if (is_stop_flush && params.use_vad) {
+                    printf("[[VAD: session_max_amp=%.4f threshold=0.005]]\n", session_max_amp);
+                    fflush(stdout);
+                }
+                if (is_stop_flush && params.use_vad && session_max_amp < 0.005f) {
                     bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
                     if (!has_speech) {
                         fprintf(stderr, "[ZianCore] VAD: no speech detected (session_max_amp=%.4f), skipping ASR\n", session_max_amp);
@@ -1056,7 +1064,11 @@ void AudioWorkerSocket(sense_voice_stream_params params, audio_socket& sock) {
             if (process_len > 0) {
                 // VAD 静音检测
                 bool skip_inference = false;
-                if (is_final_flush && params.use_vad && session_max_amp < 0.02f) {
+                if (is_final_flush && params.use_vad) {
+                    printf("[[VAD: session_max_amp=%.4f threshold=0.005]]\n", session_max_amp);
+                    fflush(stdout);
+                }
+                if (is_final_flush && params.use_vad && session_max_amp < 0.005f) {
                     bool has_speech = vad_check_has_speech(ctx, pcmf32, params.n_threads);
                     if (!has_speech) {
                         fprintf(stderr, "[ZianCore] VAD: no speech detected (session_max_amp=%.4f), skipping ASR\n", session_max_amp);
