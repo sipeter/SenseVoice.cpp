@@ -208,7 +208,7 @@ public:
     }
 
     bool init(int capture_id, int sample_rate) {
-        m_audio.reset(new audio_async(m_chunk_ms << 2));
+        m_audio.reset(new audio_async(5000)); // 同步增加到5000ms，防止长句子推理时间过长导致缓冲区溢出吞字
         if (!m_audio->init(capture_id, sample_rate)) {
             return false;
         }
@@ -426,7 +426,7 @@ static bool vad_check_has_speech(sense_voice_context* ctx,
 // ==========================================
 void AudioWorker(sense_voice_stream_params params) {
     bool mic_available = true;
-    audio_async audio(params.chunk_size << 2);
+    audio_async audio(5000); // 增加到5000ms，防止长句子推理时间过长导致缓冲区溢出吞字
     if (!audio.init(params.capture_id, SENSE_VOICE_SAMPLE_RATE)) {
         // 【v0.9.2.5 修复】SDL 初始化失败时不再直接 return
         // 而是继续加载模型，输出 ENGINE_READY，避免 C# 端永远等待
