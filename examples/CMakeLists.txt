@@ -26,6 +26,17 @@ add_subdirectory(quantize)
 
 # ZianCore 统一入口 - 合并 stream 和 zcr_main
 if(SDL2_FOUND)
+    # 【三端同步】从共享 VERSION 文件读取版本号
+    set(ZIAN_VERSION_FILE "${CMAKE_SOURCE_DIR}/../SenseVoiceInput/VERSION")
+    if(EXISTS "${ZIAN_VERSION_FILE}")
+        file(STRINGS "${ZIAN_VERSION_FILE}" ZIAN_VERSION LIMIT_COUNT 1)
+        string(STRIP "${ZIAN_VERSION}" ZIAN_VERSION)
+        message(STATUS "Zian Version: ${ZIAN_VERSION}")
+    else()
+        set(ZIAN_VERSION "unknown")
+        message(WARNING "VERSION file not found at ${ZIAN_VERSION_FILE}")
+    endif()
+
     add_executable(ZianCore 
         ZianEntry.cpp 
         zcr_main/main.cc 
@@ -38,6 +49,8 @@ if(SDL2_FOUND)
         ${PROJECT_SOURCE_DIR}/sense-voice/csrc
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
+    # 【三端同步】将版本号注入为编译宏
+    target_compile_definitions(ZianCore PRIVATE ZIAN_VERSION="${ZIAN_VERSION}")
     target_link_libraries(ZianCore PRIVATE sense-voice-core ggml common streamSDL)
 
     if(MSVC)

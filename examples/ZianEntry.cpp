@@ -4,13 +4,19 @@
 #include <windows.h>
 #include "zian_services.h"
 
+#ifndef ZIAN_VERSION
+#define ZIAN_VERSION "unknown"
+#endif
+
 int main(int argc, char* argv[]) {
+    // 启动时打印版本号
+    fprintf(stderr, "[ZianCore] v%s\n", ZIAN_VERSION);
     // 设置 DLL 搜索目录为当前 exe 同级目录下的 "lib" 文件夹
     // 这样可以让根目录保持干净
     SetDllDirectoryA("lib");
 
     if (argc < 2) {
-        std::cerr << "ZianCore Engine" << std::endl;
+        std::cerr << "ZianCore Engine v" << ZIAN_VERSION << std::endl;
         std::cerr << "Usage: ZianCore.exe --mode [input|file] [options...]" << std::endl;
         return 1;
     }
