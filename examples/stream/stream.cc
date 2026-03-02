@@ -868,6 +868,11 @@ void AudioWorkerDual(sense_voice_stream_params params, sdl_mic_source& mic, audi
 
         if (should_inference || is_stop_flush || is_preempt_flush || trigger_segmentation) {
             if (is_stop_flush) {
+                fprintf(stderr, "[AudioWorkerDual] Stop flush: pcmf32=%zu samples (%.1fs), "
+                        "full_session_audio=%zu samples (%.1fs), active=%d\n",
+                        pcmf32.size(), (double)pcmf32.size() / SAMPLE_RATE,
+                        full_session_audio.size(), (double)full_session_audio.size() / SAMPLE_RATE,
+                        g_active_source.load());
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 if (active == SourceKind::PC) {
                     mic.get(params.chunk_size, pcmf32_audio);
@@ -1049,6 +1054,10 @@ void AudioWorkerSocket(sense_voice_stream_params params, audio_socket& sock) {
 
         if (should_inference || is_final_flush || trigger_segmentation) {
             if (is_final_flush) {
+                fprintf(stderr, "[AudioWorkerSocket] Final flush: pcmf32=%zu samples (%.1fs), "
+                        "full_session_audio=%zu samples (%.1fs)\n",
+                        pcmf32.size(), (double)pcmf32.size() / SAMPLE_RATE,
+                        full_session_audio.size(), (double)full_session_audio.size() / SAMPLE_RATE);
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 sock.get(params.chunk_size, pcmf32_audio);
                 if (!pcmf32_audio.empty()) {

@@ -9,6 +9,8 @@
 #endif
 
 extern std::atomic<bool> g_should_exit;
+extern std::atomic<bool> g_is_recording;
+extern std::atomic<bool> g_needs_flush;
 
 audio_socket::audio_socket(int sample_rate)
     : m_sample_rate(sample_rate), m_running(false), m_buffer(static_cast<size_t>(sample_rate) * 30) {
@@ -91,10 +93,12 @@ void audio_socket::server_thread(int port) {
         DWORD timeout = 5000;
         setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
-        std::cerr << "[audio_socket] 客户端已连接" << std::endl;
+        fprintf(stderr, "[audio_socket] 新客户端连接 (g_is_recording=%d)\n",
+                g_is_recording.load());
         handle_client(static_cast<int>(clientSock));
         closesocket(clientSock);
-        std::cerr << "[audio_socket] 客户端已断开" << std::endl;
+        fprintf(stderr, "[audio_socket] 客户端断开 (g_is_recording=%d, g_needs_flush=%d)\n",
+                g_is_recording.load(), g_needs_flush.load());
     }
 
     closesocket(listenSock);
@@ -112,6 +116,9 @@ void audio_socket::handle_client(int client_socket) {
     while (m_running && !g_should_exit) {
         int received = recv(client_socket, buffer.data(), bufferSize, 0);
         if (received <= 0) {
+            int err = WSAGetLastError();
+            fprintf(stderr, "[audio_socket] recv 返回 %d (错误码: %d, g_is_recording=%d), 连接断开\n",
+                    received, err, g_is_recording.load());
             break;
         }
 
