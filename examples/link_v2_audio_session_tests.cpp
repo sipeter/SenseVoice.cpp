@@ -1,12 +1,23 @@
 #include "link_v2_audio_session.h"
+#include "link_v2_audio_frame.h"
 
 #include <array>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+std::vector<uint8_t> hex(const std::string& text) {
+    std::vector<uint8_t> output;
+    output.reserve(text.size() / 2);
+    for (size_t i = 0; i < text.size(); i += 2) {
+        output.push_back(static_cast<uint8_t>(std::stoul(text.substr(i, 2), nullptr, 16)));
+    }
+    return output;
 }
 }
 
@@ -32,6 +43,37 @@ int main() {
             "audio key mismatch");
     require(material.nonce_prefix[0] == 0xa1 && material.nonce_prefix[3] == 0xd4,
             "nonce prefix mismatch");
+
+    link_v2_audio_session_registry frame_registry;
+    require(frame_registry.register_session(session,
+        "e9cc0d0fc2aa95ab4bfc5ab164681a921dd91f6fb02f3d0afd69fae3c4db460c",
+        "ece763a9"), "frame session registration failed");
+    const std::string frozen_frame =
+        "5a4c3241020000112233445566778899aabbccddeeff000000000000000100000008"
+        "56fbc55b8576523d83a8a4e03e9ce80d49d745aef2d7439c";
+    std::vector<uint8_t> plaintext;
+    require(decode_link_v2_audio_frame(hex(frozen_frame), frame_registry, plaintext) ==
+        link_v2_audio_frame_result::Accepted, "frozen ZL2A frame rejected");
+    require(plaintext == hex("01000200ff7f0080"), "frozen ZL2A plaintext mismatch");
+    require(decode_link_v2_audio_frame(hex(frozen_frame), frame_registry, plaintext) ==
+        link_v2_audio_frame_result::Replay, "ZL2A replay accepted");
+
+    require(frame_registry.remove_session(session), "frame session removal failed");
+    require(frame_registry.register_session(session,
+        "e9cc0d0fc2aa95ab4bfc5ab164681a921dd91f6fb02f3d0afd69fae3c4db460c",
+        "ece763a9"), "frame session re-registration failed");
+    auto tampered = hex(frozen_frame);
+    tampered.back() ^= 1;
+    require(decode_link_v2_audio_frame(tampered, frame_registry, plaintext) ==
+        link_v2_audio_frame_result::AuthenticationFailed, "tampered ZL2A frame accepted");
+    require(decode_link_v2_audio_frame(hex(frozen_frame), frame_registry, plaintext) ==
+        link_v2_audio_frame_result::Accepted, "tag failure consumed ZL2A sequence");
+
+    auto odd = hex(frozen_frame);
+    odd[33] = 7;
+    odd.erase(odd.begin() + 34 + 7);
+    require(decode_link_v2_audio_frame(odd, frame_registry, plaintext) ==
+        link_v2_audio_frame_result::InvalidFrame, "odd PCM length accepted");
 
     require(handle_link_v2_audio_control(
         "LINK_V2_AUDIO_REGISTER " + session + " bad " + prefix,

@@ -10,6 +10,7 @@ struct link_v2_audio_key_material {
     std::array<uint8_t, 16> session_id;
     std::array<uint8_t, 32> audio_key;
     std::array<uint8_t, 4> nonce_prefix;
+    uint64_t last_sequence = 0;
 };
 
 class link_v2_audio_session_registry {
@@ -22,6 +23,7 @@ public:
     bool remove_session(const std::string& session_id_hex);
     bool find_session(const std::array<uint8_t, 16>& session_id,
                       link_v2_audio_key_material& material) const;
+    bool commit_sequence(const std::array<uint8_t, 16>& session_id, uint64_t sequence);
     void clear();
     size_t size() const;
 

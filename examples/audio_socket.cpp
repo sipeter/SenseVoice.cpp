@@ -1,4 +1,5 @@
 #include "audio_socket.h"
+#include "link_v2_audio_frame.h"
 #include <iostream>
 #include <cstring>
 
@@ -112,6 +113,9 @@ void audio_socket::handle_client(int client_socket) {
 #ifdef _WIN32
     const int bufferSize = 4096;
     std::vector<char> buffer(bufferSize);
+    std::vector<uint8_t> pending;
+    enum class wire_mode { Unknown, LegacyPcm, LinkV2 };
+    wire_mode mode = wire_mode::Unknown;
 
     while (m_running && !g_should_exit) {
         int received = recv(client_socket, buffer.data(), bufferSize, 0);
@@ -122,9 +126,45 @@ void audio_socket::handle_client(int client_socket) {
             break;
         }
 
-        size_t sample_count = static_cast<size_t>(received / 2);
-        if (sample_count > 0) {
-            push_pcm16(reinterpret_cast<const int16_t*>(buffer.data()), sample_count);
+        pending.insert(pending.end(), buffer.begin(), buffer.begin() + received);
+        if (mode == wire_mode::Unknown && pending.size() >= 4) {
+            mode = std::memcmp(pending.data(), "ZL2A", 4) == 0
+                ? wire_mode::LinkV2
+                : wire_mode::LegacyPcm;
+        }
+
+        if (mode == wire_mode::LegacyPcm) {
+            const size_t byte_count = pending.size() & ~static_cast<size_t>(1);
+            if (byte_count > 0) {
+                push_pcm16(reinterpret_cast<const int16_t*>(pending.data()), byte_count / 2);
+                pending.erase(pending.begin(), pending.begin() + byte_count);
+            }
+            continue;
+        }
+
+        while (mode == wire_mode::LinkV2 && pending.size() >= 34) {
+            const uint32_t plain_length =
+                (static_cast<uint32_t>(pending[30]) << 24) |
+                (static_cast<uint32_t>(pending[31]) << 16) |
+                (static_cast<uint32_t>(pending[32]) << 8) |
+                static_cast<uint32_t>(pending[33]);
+            if (plain_length > 65536) return;
+            const size_t frame_length = 34 + static_cast<size_t>(plain_length) + 16;
+            if (pending.size() < frame_length) break;
+
+            std::vector<uint8_t> frame(pending.begin(), pending.begin() + frame_length);
+            std::vector<uint8_t> plaintext;
+            const auto result = decode_link_v2_audio_frame(frame, m_v2_sessions, plaintext);
+            std::fill(frame.begin(), frame.end(), static_cast<uint8_t>(0));
+            if (result != link_v2_audio_frame_result::Accepted) {
+                std::fill(plaintext.begin(), plaintext.end(), static_cast<uint8_t>(0));
+                return;
+            }
+            if (!plaintext.empty()) {
+                push_pcm16(reinterpret_cast<const int16_t*>(plaintext.data()), plaintext.size() / 2);
+                std::fill(plaintext.begin(), plaintext.end(), static_cast<uint8_t>(0));
+            }
+            pending.erase(pending.begin(), pending.begin() + frame_length);
         }
     }
 #else

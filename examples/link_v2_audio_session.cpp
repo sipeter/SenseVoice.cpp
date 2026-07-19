@@ -67,6 +67,17 @@ bool link_v2_audio_session_registry::find_session(
     return true;
 }
 
+bool link_v2_audio_session_registry::commit_sequence(
+    const std::array<uint8_t, 16>& session_id, uint64_t sequence) {
+    if (sequence == 0) return false;
+    const std::string key = encode_hex(session_id.data(), session_id.size());
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto existing = m_sessions.find(key);
+    if (existing == m_sessions.end() || sequence <= existing->second.last_sequence) return false;
+    existing->second.last_sequence = sequence;
+    return true;
+}
+
 void link_v2_audio_session_registry::clear() {
     std::lock_guard<std::mutex> lock(m_mutex);
     for (auto& entry : m_sessions) clear_material(entry.second);
@@ -107,6 +118,7 @@ void link_v2_audio_session_registry::clear_material(link_v2_audio_key_material& 
     std::fill(material.session_id.begin(), material.session_id.end(), static_cast<uint8_t>(0));
     std::fill(material.audio_key.begin(), material.audio_key.end(), static_cast<uint8_t>(0));
     std::fill(material.nonce_prefix.begin(), material.nonce_prefix.end(), static_cast<uint8_t>(0));
+    material.last_sequence = 0;
 }
 
 link_v2_audio_control_result handle_link_v2_audio_control(

@@ -15,8 +15,12 @@ if(SENSE_VOICE_BUILD_TESTS)
     add_executable(link_v2_audio_session_tests
         link_v2_audio_session_tests.cpp
         link_v2_audio_session.cpp
+        link_v2_audio_frame.cpp
     )
     target_include_directories(link_v2_audio_session_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(WIN32)
+        target_link_libraries(link_v2_audio_session_tests PRIVATE bcrypt)
+    endif()
     add_test(NAME link_v2_audio_session_tests COMMAND link_v2_audio_session_tests)
 endif()
 if(SDL2_FOUND)
@@ -53,6 +57,7 @@ if(SDL2_FOUND)
         audio_pipe.cpp
         audio_socket.cpp
         link_v2_audio_session.cpp
+        link_v2_audio_frame.cpp
     )
     # 添加 include 目录（从原 stream 和 zcr_main 的 CMakeLists.txt 复制）
     target_include_directories(ZianCore PRIVATE 
@@ -62,6 +67,9 @@ if(SDL2_FOUND)
     # 【三端同步】将版本号注入为编译宏
     target_compile_definitions(ZianCore PRIVATE ZIAN_VERSION="${ZIAN_VERSION}")
     target_link_libraries(ZianCore PRIVATE sense-voice-core ggml common streamSDL)
+    if(WIN32)
+        target_link_libraries(ZianCore PRIVATE bcrypt)
+    endif()
 
     if(MSVC)
         target_compile_options(ZianCore PRIVATE 
