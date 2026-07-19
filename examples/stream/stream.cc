@@ -314,6 +314,22 @@ static ParsedCommand parse_command(const std::string& line) {
     return cmd;
 }
 
+static void emit_audio_control_result(
+        const std::string& line, link_v2_audio_control_result result) {
+    if (result != link_v2_audio_control_result::Accepted) {
+        std::cout << "[[LINK_V2_AUDIO_CONTROL_REJECTED]]" << std::endl;
+        return;
+    }
+    const std::string prefix = "LINK_V2_AUDIO_REGISTER ";
+    if (line.compare(0, prefix.size(), prefix) == 0) {
+        const size_t end = line.find(' ', prefix.size());
+        const std::string session = line.substr(prefix.size(), end - prefix.size());
+        std::cout << "[[LINK_V2_AUDIO_CONTROL_OK:" << session << "]]" << std::endl;
+        return;
+    }
+    std::cout << "[[LINK_V2_AUDIO_CONTROL_OK]]" << std::endl;
+}
+
 // ==========================================
 // VAD 静音检测常量与辅助函数
 // ==========================================
@@ -1175,9 +1191,7 @@ int run_input_mode(int argc, char **argv) {
 
                 const auto control = sock_audio.handle_control(line);
                 if (control != link_v2_audio_control_result::NotHandled) {
-                    std::cout << (control == link_v2_audio_control_result::Accepted
-                        ? "[[LINK_V2_AUDIO_CONTROL_OK]]"
-                        : "[[LINK_V2_AUDIO_CONTROL_REJECTED]]") << std::endl;
+                    emit_audio_control_result(line, control);
                     continue;
                 }
                 ParsedCommand cmd = parse_command(line);
@@ -1219,9 +1233,7 @@ int run_input_mode(int argc, char **argv) {
 
             const auto control = sock_audio.handle_control(line);
             if (control != link_v2_audio_control_result::NotHandled) {
-                std::cout << (control == link_v2_audio_control_result::Accepted
-                    ? "[[LINK_V2_AUDIO_CONTROL_OK]]"
-                    : "[[LINK_V2_AUDIO_CONTROL_REJECTED]]") << std::endl;
+                emit_audio_control_result(line, control);
                 continue;
             }
             ParsedCommand cmd = parse_command(line);
@@ -1291,9 +1303,7 @@ int run_input_mode(int argc, char **argv) {
 
             const auto control = sock_audio.handle_control(line);
             if (control != link_v2_audio_control_result::NotHandled) {
-                std::cout << (control == link_v2_audio_control_result::Accepted
-                    ? "[[LINK_V2_AUDIO_CONTROL_OK]]"
-                    : "[[LINK_V2_AUDIO_CONTROL_REJECTED]]") << std::endl;
+                emit_audio_control_result(line, control);
                 continue;
             }
             ParsedCommand cmd = parse_command(line);
