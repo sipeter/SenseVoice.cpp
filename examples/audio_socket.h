@@ -1,10 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "ring_buffer.h"
+#include "link_v2_audio_session.h"
 
 class audio_socket {
 public:
@@ -17,6 +19,7 @@ public:
     void get(int ms, std::vector<float>& audio);
     void clear();
     void set_idle(bool idle);
+    link_v2_audio_control_result handle_control(const std::string& line);
 
 private:
     void server_thread(int port);
@@ -27,4 +30,5 @@ private:
     std::atomic<bool> m_running;
     std::thread m_thread;
     RingBuffer<float> m_buffer;
+    link_v2_audio_session_registry m_v2_sessions;
 };

@@ -10,6 +10,15 @@ set(ExampleLibs ggml)
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.0)
     list(APPEND ExampleLibs stdc++fs)
 endif()
+
+if(SENSE_VOICE_BUILD_TESTS)
+    add_executable(link_v2_audio_session_tests
+        link_v2_audio_session_tests.cpp
+        link_v2_audio_session.cpp
+    )
+    target_include_directories(link_v2_audio_session_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME link_v2_audio_session_tests COMMAND link_v2_audio_session_tests)
+endif()
 if(SDL2_FOUND)
     include_directories(${SDL2_INCLUDE_DIRS})
     add_library(streamSDL STATIC common-sdl.h common-sdl.cpp)
@@ -43,6 +52,7 @@ if(SDL2_FOUND)
         stream/stream.cc
         audio_pipe.cpp
         audio_socket.cpp
+        link_v2_audio_session.cpp
     )
     # 添加 include 目录（从原 stream 和 zcr_main 的 CMakeLists.txt 复制）
     target_include_directories(ZianCore PRIVATE 

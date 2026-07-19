@@ -45,6 +45,9 @@ option(SENSE_VOICE_ALL_WARNINGS           "sense-voice: enable all compiler warn
 option(SENSE_VOICE_ALL_WARNINGS_3RD_PARTY "sense-voice: enable all compiler warnings in 3rd party libs" OFF)
 
 option(SENSE_VOICE_BUILD_TESTS "sense-voice: build tests" OFF)
+if(SENSE_VOICE_BUILD_TESTS)
+    enable_testing()
+endif()
 
 # sanitizers
 option(SENSE_VOICE_SANITIZE_THREAD    "sense-voice: enable thread sanitizer"    OFF)

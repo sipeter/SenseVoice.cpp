@@ -1173,6 +1173,13 @@ int run_input_mode(int argc, char **argv) {
                     line.pop_back();
                 }
 
+                const auto control = sock_audio.handle_control(line);
+                if (control != link_v2_audio_control_result::NotHandled) {
+                    std::cout << (control == link_v2_audio_control_result::Accepted
+                        ? "[[LINK_V2_AUDIO_CONTROL_OK]]"
+                        : "[[LINK_V2_AUDIO_CONTROL_REJECTED]]") << std::endl;
+                    continue;
+                }
                 ParsedCommand cmd = parse_command(line);
                 if (cmd.type == CommandType::Exit) {
                     g_should_exit = true;
@@ -1210,6 +1217,13 @@ int run_input_mode(int argc, char **argv) {
                 line.pop_back();
             }
 
+            const auto control = sock_audio.handle_control(line);
+            if (control != link_v2_audio_control_result::NotHandled) {
+                std::cout << (control == link_v2_audio_control_result::Accepted
+                    ? "[[LINK_V2_AUDIO_CONTROL_OK]]"
+                    : "[[LINK_V2_AUDIO_CONTROL_REJECTED]]") << std::endl;
+                continue;
+            }
             ParsedCommand cmd = parse_command(line);
             if (cmd.type == CommandType::Exit) {
                 g_should_exit = true;
@@ -1275,6 +1289,13 @@ int run_input_mode(int argc, char **argv) {
                 line.pop_back();
             }
 
+            const auto control = sock_audio.handle_control(line);
+            if (control != link_v2_audio_control_result::NotHandled) {
+                std::cout << (control == link_v2_audio_control_result::Accepted
+                    ? "[[LINK_V2_AUDIO_CONTROL_OK]]"
+                    : "[[LINK_V2_AUDIO_CONTROL_REJECTED]]") << std::endl;
+                continue;
+            }
             ParsedCommand cmd = parse_command(line);
             if (cmd.type == CommandType::Exit) {
                 g_should_exit = true;

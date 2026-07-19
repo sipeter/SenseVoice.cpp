@@ -155,3 +155,7 @@ void audio_socket::clear() {
 void audio_socket::set_idle(bool idle) {
     m_buffer.set_overwrite_oldest(idle);
 }
+
+link_v2_audio_control_result audio_socket::handle_control(const std::string& line) {
+    return handle_link_v2_audio_control(line, m_v2_sessions);
+}
