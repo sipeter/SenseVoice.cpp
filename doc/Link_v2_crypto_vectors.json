@@ -1,0 +1,22 @@
+{
+  "curve": "P-256",
+  "deviceId": "zian-test-device",
+  "pin": "1234",
+  "clientPrivateKey": "01",
+  "serverPrivateKey": "02",
+  "clientPublicKey": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+  "serverPublicKey": "047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1",
+  "clientRandom": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "serverRandom": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "sharedSecret": "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978",
+  "transcriptHash": "76254f398cb68c3df84c53c82c50f824572ffe382a435f59a85740c4a493020c",
+  "salt": "fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108",
+  "authKey": "7aa111d26460b8345879c93fc40825d8cb1f61312b611bdff6438daa69366dd0",
+  "messageKey": "b9e2b472b30e915af2c0b4446f263bbe7f29773f4168ef337fd7a829e02ceed9",
+  "audioKey": "e9cc0d0fc2aa95ab4bfc5ab164681a921dd91f6fb02f3d0afd69fae3c4db460c",
+  "clientMessageNoncePrefix": "91fb31dc",
+  "serverMessageNoncePrefix": "79868859",
+  "audioNoncePrefix": "ece763a9",
+  "authProof": "372f97d215cd48647e9ff0809ed9667ee66dadac46305fd2ae84639a93e5831b",
+  "messageVector": {"sequence":1,"messageType":1,"plaintextUtf8":"hello-v2","nonce":"91fb31dc0000000000000001","aad":"5a4c324d02000001000000000000000100000008","ciphertext":"8111fef5346b3f62","tag":"5a88f88fde6a7f216e967938e0eac555"}
+}
