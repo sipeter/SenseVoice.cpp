@@ -52,6 +52,9 @@ int main() {
         "5a4c3241020000112233445566778899aabbccddeeff000000000000000100000008"
         "56fbc55b8576523d83a8a4e03e9ce80d49d745aef2d7439c";
     std::vector<uint8_t> plaintext;
+    link_v2_audio_session_registry unknown_registry;
+    require(decode_link_v2_audio_frame(hex(frozen_frame), unknown_registry, plaintext) ==
+        link_v2_audio_frame_result::UnknownSession, "unregistered ZL2A session accepted");
     require(decode_link_v2_audio_frame(hex(frozen_frame), frame_registry, plaintext) ==
         link_v2_audio_frame_result::Accepted, "frozen ZL2A frame rejected");
     require(plaintext == hex("01000200ff7f0080"), "frozen ZL2A plaintext mismatch");
