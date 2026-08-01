@@ -4,9 +4,12 @@
 #include <SDL_audio.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
-#include <vector>
 #include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 //
 // SDL Audio capture
@@ -32,7 +35,26 @@ public:
     void get(int ms, std::vector<float> & audio);
 
 private:
-    SDL_AudioDeviceID m_dev_id_in = 0;
+    bool open_capture_device();
+    void close_capture_device(const char * reason);
+    void pump_device_events();
+    void reconnect_if_needed();
+    void device_monitor_loop();
+    bool capture_device_is_present() const;
+    void emit_offline_signal();
+
+    std::atomic<SDL_AudioDeviceID> m_dev_id_in { 0 };
+    int m_capture_id = -1;
+    int m_requested_sample_rate = 0;
+    std::string m_capture_name;
+    std::chrono::steady_clock::time_point m_last_reconnect_attempt;
+    std::atomic<int64_t> m_last_capture_callback_ms { 0 };
+    bool m_has_opened_once = false;
+    bool m_reconnect_failure_logged = false;
+    bool m_offline_signal_sent = false;
+    std::atomic_bool m_device_monitor_stop { false };
+    std::thread m_device_monitor;
+    std::mutex m_device_mutex;
 
     int m_len_ms = 0;
     int m_sample_rate = 0;

@@ -45,6 +45,7 @@ std::atomic<bool> g_should_exit(false);
 std::atomic<bool> g_needs_flush(false);
 std::atomic<bool> g_preempt_requested(false);
 std::atomic<int> g_active_source(0);
+std::atomic<bool> g_clear_local_audio_on_start(false);
 
 enum class SourceKind {
     None = 0,
@@ -494,6 +495,12 @@ void AudioWorker(sense_voice_stream_params params) {
     while (!g_should_exit) {
         // A. 录音状态
         if (g_is_recording && mic_available) {
+            if (g_clear_local_audio_on_start.exchange(false)) {
+                // Keep the 5-second runtime buffer for slow inference, but
+                // clear it at the START boundary before the first session read.
+                audio.clear();
+                pcmf32_audio.clear();
+            }
             audio.get(params.chunk_size, pcmf32_audio);
             if (!pcmf32_audio.empty()) {
                 
@@ -1367,6 +1374,7 @@ int run_input_mode(int argc, char **argv) {
         }
 
         if (line == "START") {
+            g_clear_local_audio_on_start = true;
             g_is_recording = true;
             g_needs_flush = false;
         } 
