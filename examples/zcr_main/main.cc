@@ -13,6 +13,7 @@
 #include "sense-voice.h"
 #include "silero-vad.h"
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <thread>
 #include <fstream>
@@ -66,6 +67,7 @@ struct sense_voice_params {
     bool flash_attn = false;
     bool use_itn = false;
     bool use_prefix = true;
+    bool print_progress = false;
 
     std::string language = "auto";
     std::string prompt;
@@ -130,12 +132,13 @@ static void sense_voice_print_usage(int /*argc*/, char **argv, const sense_voice
     fprintf(stderr, "  -fa,       --flash-attn        [%-7s] flash attention\n", params.flash_attn ? "true" : "false");
     fprintf(stderr, "  -itn,      --use-itn           [%-7s] use itn\n", params.use_itn ? "true" : "false");
     fprintf(stderr, "  -fout      --outfile           [%s] output file path\n", params.outfile.c_str());
-    fprintf(stderr, "             --chunk_size        [%-7lu] vad chunk size(ms)\n", params.chunk_size);
-    fprintf(stderr, "  -mmc       --min-mute-chunks   [%-7lu] When consecutive chunks are identified as silence\n", params.min_mute_chunks);
-    fprintf(stderr, "  -mnc       --max-nomute-chunks [%-7lu] when the first non-silent chunk is too far away\n", params.max_nomute_chunks);
-    fprintf(stderr, "             --maxchunk-in-batch [%-7lu] the number of cutted audio can be processed at one time\n", params.max_chunks_in_batch);
-    fprintf(stderr, "  -b         --batch             [%-7lu] the number of cutted audio can be processed at one time\n", params.max_batch);
+    fprintf(stderr, "             --chunk_size        [%-7zu] vad chunk size(ms)\n", params.chunk_size);
+    fprintf(stderr, "  -mmc       --min-mute-chunks   [%-7zu] When consecutive chunks are identified as silence\n", params.min_mute_chunks);
+    fprintf(stderr, "  -mnc       --max-nomute-chunks [%-7zu] when the first non-silent chunk is too far away\n", params.max_nomute_chunks);
+    fprintf(stderr, "             --maxchunk-in-batch [%-7zu] the number of cutted audio can be processed at one time\n", params.max_chunks_in_batch);
+    fprintf(stderr, "  -b         --batch             [%-7zu] the number of cutted audio can be processed at one time\n", params.max_batch);
     fprintf(stderr, "  -spt       --speech-prob-threshold [%-7.3f] speech probability threshold for VAD\n", params.speech_prob_threshold);
+    fprintf(stderr, "             --print-progress    [%-7s] print machine-readable file progress events\n", params.print_progress ? "true" : "false");
     fprintf(stderr, "\n");
 }
 
@@ -223,6 +226,8 @@ static bool sense_voice_params_parse(int argc, char **argv, sense_voice_params &
             params.outfile = argv[++i];
         } else if (arg == "-spt" || arg == "--speech-prob-threshold") {
             params.speech_prob_threshold = std::stof(argv[++i]);
+        } else if (arg == "--print-progress") {
+            params.print_progress = true;
         } else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
             sense_voice_print_usage(argc, argv, params);
@@ -238,14 +243,80 @@ static bool is_file_exist(const char *fileName) {
     return infile.good();
 }
 
+struct file_progress_reporter {
+    bool enabled;
+    size_t total_samples;
+    size_t last_processed_samples = 0;
+    bool has_progress = false;
+    std::chrono::steady_clock::time_point last_emit = std::chrono::steady_clock::now();
+
+    file_progress_reporter(const sense_voice_params &progress_params, size_t sample_count)
+        : enabled(progress_params.print_progress), total_samples(sample_count) {
+    }
+
+    void begin() {
+        if (!enabled) return;
+        fprintf(stderr, "FILE_BEGIN:duration_seconds=%.3f;source=model\n",
+                static_cast<double>(total_samples) / SENSE_VOICE_SAMPLE_RATE);
+        fflush(stderr);
+        emit(0, true);
+    }
+
+    void update(size_t processed_samples, bool force = false) {
+        if (!enabled) return;
+
+        processed_samples = std::min(processed_samples, total_samples);
+        if (!force && total_samples > 0 && processed_samples >= total_samples) {
+            processed_samples = total_samples - 1;
+        }
+        if (processed_samples < last_processed_samples) {
+            processed_samples = last_processed_samples;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (!force) {
+            if (processed_samples == last_processed_samples) return;
+            if (has_progress && now - last_emit < std::chrono::milliseconds(250)) return;
+        }
+
+        emit(processed_samples, force);
+    }
+
+    void complete(size_t segment_count) {
+        update(total_samples, true);
+        if (!enabled) return;
+        fprintf(stderr, "FILE_DONE:status=success;segments=%zu\n", segment_count);
+        fflush(stderr);
+    }
+
+    void fail(const char *reason) {
+        if (!enabled) return;
+        fprintf(stderr, "FILE_DONE:status=error;reason=%s\n", reason);
+        fflush(stderr);
+    }
+
+private:
+    void emit(size_t processed_samples, bool /*force*/) {
+        last_processed_samples = processed_samples;
+        last_emit = std::chrono::steady_clock::now();
+        has_progress = true;
+        fprintf(stderr,
+                "PROGRESS:phase=recognize;processed_seconds=%.3f;total_seconds=%.3f\n",
+                static_cast<double>(processed_samples) / SENSE_VOICE_SAMPLE_RATE,
+                static_cast<double>(total_samples) / SENSE_VOICE_SAMPLE_RATE);
+        fflush(stderr);
+    }
+};
+
 // 函数声明
-void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const sense_voice_params &params, 
-                                         std::ifstream &file, const WaveHeader &header);
-void sense_voice_process_batch(struct sense_voice_context *ctx, const sense_voice_params &params,
-                               std::vector<sense_voice_segment> &batch);
-bool check_and_process_batch_if_full(struct sense_voice_context *ctx, const sense_voice_params &params,
-                                     std::vector<sense_voice_segment> &current_batch, size_t &current_batch_size,
-                                     size_t new_segment_size, size_t batch_samples);
+bool sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const sense_voice_params &params,
+                                          std::ifstream &file,
+                                          file_progress_reporter &progress, size_t &segment_count);
+bool sense_voice_process_batch(struct sense_voice_context *ctx, const sense_voice_params &params,
+                               std::vector<sense_voice_segment> &batch, size_t &segment_count);
+bool enqueue_segment(struct sense_voice_context *ctx, const sense_voice_params &params,
+                     std::vector<sense_voice_segment> &current_batch, size_t &current_batch_size,
+                     sense_voice_segment &&segment, size_t batch_samples, size_t &segment_count);
 
 /**
  * This the arbitrary data which will be passed to each callback.
@@ -344,8 +415,9 @@ void sense_voice_free(struct sense_voice_context *ctx) {
 }
 
 // 流式音频处理：从ifstream逐块读取并处理
-void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const sense_voice_params &params, 
-                                         std::ifstream &file, const WaveHeader &header) {
+bool sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const sense_voice_params &params,
+                                          std::ifstream &file,
+                                          file_progress_reporter &progress, size_t &segment_count) {
     const int n_sample_step = params.chunk_size * 1e-3 * SENSE_VOICE_SAMPLE_RATE;
     const int keep_nomute_step = params.chunk_size * params.min_mute_chunks * 1e-3 * SENSE_VOICE_SAMPLE_RATE;
     const int max_nomute_step = params.chunk_size * params.max_nomute_chunks * 1e-3 * SENSE_VOICE_SAMPLE_RATE;
@@ -362,6 +434,17 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
     const size_t chunk_samples = n_sample_step;
     int processed_samples = 0;
     size_t global_offset = 0;  // 累计已裁剪的样本数，用于绝对时间计算
+
+    auto report_safe_progress = [&]() {
+        size_t safe_samples = global_offset + static_cast<size_t>(std::max(processed_samples, 0));
+        if (L_nomute >= 0) {
+            safe_samples = std::min(safe_samples, global_offset + static_cast<size_t>(L_nomute));
+        }
+        if (!current_batch.empty()) {
+            safe_samples = std::min(safe_samples, current_batch.front().t0);
+        }
+        progress.update(safe_samples);
+    };
 
     // 逐块读取音频数据
     while (read_audio_chunk(file, chunk_data, chunk_samples)) {
@@ -405,12 +488,10 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
                 segment.t1 = R_nomute + global_offset;
                 segment.samples = std::vector<float>(audio_buffer.begin() + L_nomute, audio_buffer.begin() + R_nomute);
 
-                size_t segment_size = segment.samples.size();
-                check_and_process_batch_if_full(ctx, params, current_batch, current_batch_size, 
-                                              segment_size, batch_samples);
-                
-                current_batch.push_back(segment);
-                current_batch_size += segment_size;
+                if (!enqueue_segment(ctx, params, current_batch, current_batch_size,
+                                     std::move(segment), batch_samples, segment_count)) {
+                    return false;
+                }
 
                 if (!isnomute) L_nomute = -1;
                 else if (R_mute >= 0 && L_mute >= L_nomute) L_nomute = R_mute;
@@ -418,6 +499,7 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
                 L_mute = R_mute = -1;
                 
                 processed_samples = R_this_chunk;
+                report_safe_progress();
                 continue;
             }
 
@@ -432,12 +514,10 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
                     segment.t1 = L_mute + global_offset;
                     segment.samples = std::vector<float>(audio_buffer.begin() + L_nomute, audio_buffer.begin() + L_mute);
 
-                    size_t segment_size = segment.samples.size();
-                    check_and_process_batch_if_full(ctx, params, current_batch, current_batch_size, 
-                                                  segment_size, batch_samples);
-                    
-                    current_batch.push_back(segment);
-                    current_batch_size += segment_size;
+                    if (!enqueue_segment(ctx, params, current_batch, current_batch_size,
+                                         std::move(segment), batch_samples, segment_count)) {
+                        return false;
+                    }
 
                     if (!isnomute) L_nomute = -1;
                     else if (R_mute >= 0) L_nomute = R_mute;
@@ -447,6 +527,7 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
             }
             
             processed_samples = R_this_chunk;
+            report_safe_progress();
         }
         
         // 定期清理已处理的缓冲区数据，防止内存无限增长
@@ -482,6 +563,8 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
                 if (processed_samples < 0) processed_samples = 0;
             }
         }
+
+        report_safe_progress();
     }
 
     // 处理最后一段
@@ -491,22 +574,27 @@ void sense_voice_process_stream_from_file(struct sense_voice_context *ctx, const
         segment.t1 = audio_buffer.size() + global_offset;
         segment.samples = std::vector<float>(audio_buffer.begin() + L_nomute, audio_buffer.end());
 
-        size_t segment_size = segment.samples.size();
-        check_and_process_batch_if_full(ctx, params, current_batch, current_batch_size, 
-                                      segment_size, batch_samples);
-        
-        current_batch.push_back(segment);
+        if (!enqueue_segment(ctx, params, current_batch, current_batch_size,
+                             std::move(segment), batch_samples, segment_count)) {
+            return false;
+        }
     }
 
     // 处理最后的batch
     if (!current_batch.empty()) {
-        sense_voice_process_batch(ctx, params, current_batch);
+        if (!sense_voice_process_batch(ctx, params, current_batch, segment_count)) {
+            return false;
+        }
+        current_batch.clear();
+        current_batch_size = 0;
     }
+
+    return true;
 }
 
 // 处理一个batch并清理计算图缓冲区
-void sense_voice_process_batch(struct sense_voice_context *ctx, const sense_voice_params &params,
-                               std::vector<sense_voice_segment> &batch) {
+bool sense_voice_process_batch(struct sense_voice_context *ctx, const sense_voice_params &params,
+                               std::vector<sense_voice_segment> &batch, size_t &segment_count) {
     // 清理之前的结果
     ctx->state->result_all.clear();
     ctx->state->segmentIDs.clear();
@@ -523,32 +611,50 @@ void sense_voice_process_batch(struct sense_voice_context *ctx, const sense_voic
     wparams.n_threads = params.n_threads;
     wparams.debug_mode = params.debug_mode;
 
-    sense_voice_batch_full(ctx, wparams);
+    const int inference_result = sense_voice_batch_full(ctx, wparams);
+    if (inference_result != 0) {
+        fprintf(stderr, "error: sense_voice_batch_full failed with code %d\n", inference_result);
+        ctx->state->result_all.clear();
+        ctx->state->segmentIDs.clear();
+        return false;
+    }
+
     sense_voice_batch_print_output(ctx, params.use_prefix, params.use_itn);
+    fflush(stdout);
+    segment_count += batch.size();
 
     // 清理处理后的结果以释放内存
     ctx->state->result_all.clear();
     ctx->state->segmentIDs.clear();
+    return true;
 }
 
-// 检查batch是否满载，如果满载则处理并清空
-bool check_and_process_batch_if_full(struct sense_voice_context *ctx, const sense_voice_params &params,
-                                     std::vector<sense_voice_segment> &current_batch, size_t &current_batch_size,
-                                     size_t new_segment_size, size_t batch_samples) {
-    if (!current_batch.empty() && 
-        (current_batch_size + new_segment_size > batch_samples || 
-         current_batch.size() >= params.max_batch)) {
-        
-        // 处理当前batch
-        sense_voice_process_batch(ctx, params, current_batch);
-        
-        // 清空batch准备下一轮
+// 将片段加入batch；达到数量上限时立即处理，避免batch=1等待下一个片段。
+bool enqueue_segment(struct sense_voice_context *ctx, const sense_voice_params &params,
+                     std::vector<sense_voice_segment> &current_batch, size_t &current_batch_size,
+                     sense_voice_segment &&segment, size_t batch_samples, size_t &segment_count) {
+    const size_t segment_size = segment.samples.size();
+
+    if (!current_batch.empty() && current_batch_size + segment_size > batch_samples) {
+        if (!sense_voice_process_batch(ctx, params, current_batch, segment_count)) {
+            return false;
+        }
         current_batch.clear();
         current_batch_size = 0;
-        
-        return true; // 表示已处理了一个batch
     }
-    return false; // 表示未处理batch
+
+    current_batch.push_back(std::move(segment));
+    current_batch_size += segment_size;
+
+    if (current_batch.size() >= params.max_batch) {
+        if (!sense_voice_process_batch(ctx, params, current_batch, segment_count)) {
+            return false;
+        }
+        current_batch.clear();
+        current_batch_size = 0;
+    }
+
+    return true;
 }
 
 int run_transcribe_mode(int argc, char **argv) {
@@ -556,6 +662,11 @@ int run_transcribe_mode(int argc, char **argv) {
 
     if (!sense_voice_params_parse(argc, argv, params)) {
         sense_voice_print_usage(argc, argv, params);
+        return 1;
+    }
+
+    if (params.chunk_size == 0 || params.max_batch == 0 || params.max_chunks_in_batch == 0) {
+        fprintf(stderr, "error: chunk size, batch size, and max chunks in batch must be greater than zero\n");
         return 1;
     }
 
@@ -634,6 +745,7 @@ int run_transcribe_mode(int argc, char **argv) {
     ggml_set_zero(ctx->state->vad_lstm_context);
     ggml_set_zero(ctx->state->vad_lstm_hidden_state);
 
+    bool had_failure = false;
     for (int f = 0; f < (int) params.fname_inp.size(); ++f) {
         const auto fname_inp = params.fname_inp[f];
         const auto fname_out = f < (int) params.fname_out.size() && !params.fname_out[f].empty() ? params.fname_out[f] : params.fname_inp[f];
@@ -642,6 +754,11 @@ int run_transcribe_mode(int argc, char **argv) {
         std::ifstream file(fname_inp.c_str(), std::ios::binary);
         if (!file) {
             fprintf(stderr, "error: failed to open audio file '%s'\n", fname_inp.c_str());
+            if (params.print_progress) {
+                fprintf(stderr, "FILE_DONE:status=error;reason=open_failed\n");
+                fflush(stderr);
+            }
+            had_failure = true;
             continue;
         }
 
@@ -650,17 +767,30 @@ int run_transcribe_mode(int argc, char **argv) {
         file.read(reinterpret_cast<char*>(&header), sizeof(header));
         if (!file || !header.Validate()) {
             fprintf(stderr, "error: invalid WAV file format '%s'\n", fname_inp.c_str());
+            if (params.print_progress) {
+                fprintf(stderr, "FILE_DONE:status=error;reason=invalid_wav\n");
+                fflush(stderr);
+            }
+            had_failure = true;
             continue;
         }
 
         header.SeekToDataChunk(file);
         if (!file) {
             fprintf(stderr, "error: failed to find data chunk in '%s'\n", fname_inp.c_str());
+            if (params.print_progress) {
+                fprintf(stderr, "FILE_DONE:status=error;reason=data_chunk_missing\n");
+                fflush(stderr);
+            }
+            had_failure = true;
             continue;
         }
 
         int sample_rate = header.sample_rate;
         size_t total_samples = header.subchunk2_size / 2; // 16-bit samples
+        ctx->state->duration = float(total_samples) / sample_rate;
+        file_progress_reporter progress{params, total_samples};
+        progress.begin();
 
         if (!params.no_prints) {
             // print system information
@@ -674,17 +804,19 @@ int run_transcribe_mode(int argc, char **argv) {
                     __func__, total_samples, float(total_samples) / sample_rate,
                     params.n_threads, params.n_processors,
                     params.language.c_str());
-            ctx->state->duration = float(total_samples) / sample_rate;
             fprintf(stderr, "\n");
         }
 
-        {
-            // 使用流式处理音频
-            sense_voice_process_stream_from_file(ctx, params, file, header);
+        size_t segment_count = 0;
+        if (!sense_voice_process_stream_from_file(ctx, params, file, progress, segment_count)) {
+            progress.fail("model_inference");
+            had_failure = true;
+        } else {
+            progress.complete(segment_count);
         }
         
         file.close();
     }
     sense_voice_free(ctx);
-    return 0;
+    return had_failure ? 4 : 0;
 }
