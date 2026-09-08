@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -28,30 +29,47 @@ public:
     bool pause();
     bool clear();
 
-    // callback to be called by SDL
-    void callback(uint8_t * stream, int len);
-
     // get audio data from the circular buffer
     void get(int ms, std::vector<float> & audio);
 
 private:
+    friend struct audio_async_recovery_tests;
+
     bool open_capture_device();
     void close_capture_device(const char * reason);
     void pump_device_events();
     void reconnect_if_needed();
     void device_monitor_loop();
     bool capture_device_is_present() const;
-    void emit_offline_signal();
+    void begin_microphone_recovery(const char * reason);
+    void confirm_microphone_recovered();
+    void callback(uint8_t * stream, int len, uint64_t device_generation);
+
+    enum microphone_state {
+        microphone_starting = 0,
+        microphone_online = 1,
+        microphone_recovering = 2,
+    };
+
+    struct callback_context {
+        audio_async * owner;
+        uint64_t device_generation;
+    };
 
     std::atomic<SDL_AudioDeviceID> m_dev_id_in { 0 };
+    std::atomic<uint64_t> m_active_device_generation { 0 };
+    uint64_t m_next_device_generation = 0;
+    std::vector<std::unique_ptr<callback_context>> m_callback_contexts;
     int m_capture_id = -1;
     int m_requested_sample_rate = 0;
     std::string m_capture_name;
     std::chrono::steady_clock::time_point m_last_reconnect_attempt;
     std::atomic<int64_t> m_last_capture_callback_ms { 0 };
+    std::atomic<int64_t> m_recovery_opened_at_ms { 0 };
+    std::atomic<int> m_microphone_state { microphone_starting };
+    std::atomic_bool m_recovery_callback_confirmed { false };
     bool m_has_opened_once = false;
     bool m_reconnect_failure_logged = false;
-    bool m_offline_signal_sent = false;
     std::atomic_bool m_device_monitor_stop { false };
     std::thread m_device_monitor;
     std::mutex m_device_mutex;

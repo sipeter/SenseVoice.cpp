@@ -2,6 +2,11 @@
 
 #include <cstring>
 #include <cstdio>
+#include <utility>
+
+namespace {
+constexpr int64_t k_capture_stall_timeout_ms = 5000;
+}
 
 audio_async::audio_async(int len_ms) {
     m_len_ms = len_ms;
@@ -68,21 +73,26 @@ bool audio_async::open_capture_device() {
     SDL_zero(capture_spec_requested);
     SDL_zero(capture_spec_obtained);
 
+    const uint64_t device_generation = ++m_next_device_generation;
+    auto callback_data_holder = std::unique_ptr<callback_context>(
+            new callback_context { this, device_generation });
+    callback_context * callback_data = callback_data_holder.get();
+
     capture_spec_requested.freq     = m_requested_sample_rate;
     capture_spec_requested.format   = AUDIO_F32;
     capture_spec_requested.channels = 1;
     capture_spec_requested.samples  = 1024;
     capture_spec_requested.callback = [](void * userdata, uint8_t * stream, int len) {
-        audio_async * audio = (audio_async *) userdata;
-        audio->callback(stream, len);
+        callback_context * context = static_cast<callback_context *>(userdata);
+        context->owner->callback(stream, len, context->device_generation);
     };
-    capture_spec_requested.userdata = this;
+    capture_spec_requested.userdata = callback_data;
 
     const char * device_name = m_capture_name.empty() ? nullptr : m_capture_name.c_str();
     const bool log_attempt = !m_has_opened_once || !m_reconnect_failure_logged;
     if (m_capture_id >= 0) {
         if (device_name == nullptr) {
-            emit_offline_signal();
+            begin_microphone_recovery("configured_device_unavailable");
             if (log_attempt) {
                 fprintf(stderr, "%s: configured capture device %d is unavailable\n", __func__, m_capture_id);
                 m_reconnect_failure_logged = true;
@@ -106,13 +116,15 @@ bool audio_async::open_capture_device() {
             &capture_spec_obtained,
             0);
     if (!opened) {
-        emit_offline_signal();
+        begin_microphone_recovery("open_failed");
         if (log_attempt) {
             fprintf(stderr, "%s: couldn't open an audio device for capture: %s!\n", __func__, SDL_GetError());
             m_reconnect_failure_logged = true;
         }
         return false;
     }
+
+    m_callback_contexts.emplace_back(std::move(callback_data_holder));
 
     m_sample_rate = capture_spec_obtained.freq;
     {
@@ -121,9 +133,14 @@ bool audio_async::open_capture_device() {
         m_audio_pos = 0;
         m_audio_len = 0;
     }
-    m_dev_id_in = opened;
-    m_last_capture_callback_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    const int64_t opened_at_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+    m_active_device_generation = device_generation;
+    m_dev_id_in = opened;
+    m_last_capture_callback_ms = opened_at_ms;
+    // A fresh Core must confirm capture too, including after a fallback restart.
+    m_recovery_callback_confirmed = false;
+    m_recovery_opened_at_ms = opened_at_ms;
 
     fprintf(stderr, "%s: obtained spec for input device (SDL Id = %d):\n", __func__, opened);
     fprintf(stderr, "%s:     - sample rate:       %d\n",                   __func__, capture_spec_obtained.freq);
@@ -136,14 +153,13 @@ bool audio_async::open_capture_device() {
     if (m_running) {
         SDL_PauseAudioDevice(opened, 0);
     }
-    if (m_has_opened_once) {
-        fprintf(stderr, "[ZianCore] audio capture device reconnected: '%s' (SDL Id = %d)\n",
+    if (m_microphone_state.load() == microphone_recovering) {
+        fprintf(stderr, "[ZianCore] audio capture device reopened; waiting for valid callback: '%s' (SDL Id = %d)\n",
                 device_name == nullptr ? "default" : device_name,
                 opened);
     }
     m_has_opened_once = true;
     m_reconnect_failure_logged = false;
-    m_offline_signal_sent = false;
     return true;
 }
 
@@ -151,7 +167,14 @@ void audio_async::close_capture_device(const char * reason) {
     std::lock_guard<std::mutex> device_lock(m_device_mutex);
     const SDL_AudioDeviceID closing = m_dev_id_in.exchange(0);
     if (!closing) return;
+    m_active_device_generation = 0;
+    m_recovery_opened_at_ms = 0;
+    m_recovery_callback_confirmed = false;
     const bool was_running = m_running.exchange(false);
+    // WASAPI close may block. Notify the frontend before entering the driver.
+    if (reason == nullptr || std::strcmp(reason, "shutdown") != 0) {
+        begin_microphone_recovery(reason);
+    }
     SDL_CloseAudioDevice(closing);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -161,20 +184,40 @@ void audio_async::close_capture_device(const char * reason) {
     if (was_running) {
         m_running = true;
     }
-    if (reason == nullptr || std::strcmp(reason, "shutdown") != 0) {
-        emit_offline_signal();
-    }
     m_reconnect_failure_logged = false;
     fprintf(stderr, "[ZianCore] audio capture device closed (%s, SDL Id = %d)\n",
             reason == nullptr ? "unknown" : reason,
             closing);
 }
 
-void audio_async::emit_offline_signal() {
-    if (m_offline_signal_sent) return;
-    fprintf(stdout, "[[MIC_OFFLINE]]\n");
+void audio_async::begin_microphone_recovery(const char * reason) {
+    if (m_microphone_state.exchange(microphone_recovering) == microphone_recovering) return;
+
+    m_recovery_opened_at_ms = 0;
+    m_recovery_callback_confirmed = false;
+    fprintf(stdout, "[[MIC_OFFLINE:reason=%s]]\n", reason == nullptr ? "unknown" : reason);
+    fprintf(stdout, "[[MIC_RECOVERING]]\n");
     fflush(stdout);
-    m_offline_signal_sent = true;
+}
+
+void audio_async::confirm_microphone_recovered() {
+    if (m_microphone_state.load() == microphone_online ||
+        !m_recovery_callback_confirmed.load()) {
+        return;
+    }
+
+    const SDL_AudioDeviceID current = m_dev_id_in.load();
+    if (!current || !m_running || m_recovery_opened_at_ms.load() == 0) return;
+
+    fprintf(stderr, "[ZianCore] audio capture device online after valid callback: '%s' (SDL Id = %d)\n",
+            m_capture_name.empty() ? "default" : m_capture_name.c_str(),
+            current);
+    fprintf(stdout, "[[MIC_ONLINE:id=%d]]\n", current);
+    fflush(stdout);
+
+    m_recovery_opened_at_ms = 0;
+    m_recovery_callback_confirmed = false;
+    m_microphone_state = microphone_online;
 }
 
 bool audio_async::capture_device_is_present() const {
@@ -217,11 +260,12 @@ void audio_async::reconnect_if_needed() {
             const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
             const int64_t callback_ms = m_last_capture_callback_ms.load();
-            if (callback_ms != 0 && now_ms - callback_ms > 2000) {
+            if (callback_ms != 0 && now_ms - callback_ms > k_capture_stall_timeout_ms) {
                 close_capture_device("capture callback stalled");
             }
         }
     }
+    confirm_microphone_recovered();
     if (m_dev_id_in.load() || !m_running) return;
 
     const auto now = std::chrono::steady_clock::now();
@@ -284,15 +328,18 @@ bool audio_async::clear() {
 }
 
 // callback to be called by SDL
-void audio_async::callback(uint8_t * stream, int len) {
-    if (!m_running) {
+void audio_async::callback(uint8_t * stream, int len, uint64_t device_generation) {
+    if (!m_running ||
+        m_active_device_generation.load() != device_generation ||
+        stream == nullptr ||
+        len <= 0) {
         return;
     }
 
-    m_last_capture_callback_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    const int64_t callback_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-
     size_t n_samples = len / sizeof(float);
+    if (n_samples == 0) return;
 
     if (n_samples > m_audio.size()) {
         n_samples = m_audio.size();
@@ -304,6 +351,14 @@ void audio_async::callback(uint8_t * stream, int len) {
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+
+        if (!m_running ||
+            m_active_device_generation.load() != device_generation ||
+            m_dev_id_in.load() == 0) {
+            return;
+        }
+
+        m_last_capture_callback_ms = callback_ms;
 
         if (m_audio_pos + n_samples > m_audio.size()) {
             const size_t n0 = m_audio.size() - m_audio_pos;
@@ -318,6 +373,15 @@ void audio_async::callback(uint8_t * stream, int len) {
             m_audio_pos = (m_audio_pos + n_samples) % m_audio.size();
         }
         m_audio_len = std::min(m_audio_len + n_samples, m_audio.size());
+    }
+
+    const int64_t recovery_opened_at_ms = m_recovery_opened_at_ms.load();
+    if (m_microphone_state.load() != microphone_online &&
+        m_active_device_generation.load() == device_generation &&
+        recovery_opened_at_ms != 0 &&
+        callback_ms >= recovery_opened_at_ms &&
+        m_dev_id_in.load() != 0) {
+        m_recovery_callback_confirmed = true;
     }
 }
 
